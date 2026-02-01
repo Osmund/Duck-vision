@@ -109,7 +109,7 @@ class DuckVision:
         print("👁️  Duck-Vision Kjører")
         print("=" * 60)
         print("\nModus:")
-        print("  - Ansiktsgjenkjenning: Kontinuerlig")
+        print("  - Ansiktsgjenkjenning: På forespørsel")
         print("  - Objektgjenkjenning: På forespørsel\n")
         print("Trykk Ctrl+C for å stoppe\n")
         
@@ -117,10 +117,10 @@ class DuckVision:
             while self.running:
                 current_time = time.time()
                 
-                # Ansiktsdeteksjon med intervall
-                if current_time - self.last_face_detection >= FACE_CONFIG["detection_interval"]:
-                    self._check_faces()
-                    self.last_face_detection = current_time
+                # Ansiktsdeteksjon: Kun på forespørsel (ikke kontinuerlig)
+                # if current_time - self.last_face_detection >= FACE_CONFIG["detection_interval"]:
+                #     self._check_faces()
+                #     self.last_face_detection = current_time
                 
                 # Objektdeteksjon hvis i riktig modus
                 if self.mode == VisionMode.OBJECT_DETECTION:
@@ -392,30 +392,58 @@ class DuckVision:
                 logging.info(f"  → OpenAI Vision generell analyse")
         
         elif command == "check_person":
-            # Sjekk hvem som er der akkurat nå
-            logging.info("👀 Sjekk hvem som er tilstede...")
-            faces = self.face_recognizer.detect_faces()
+            # Sjekk hvem som er der akkurat nå - prøv opptil 3 ganger
+            logging.info("👀 Sjekk hvem som er tilstede (prøver opptil 3 ganger)...")
             
-            if not faces or len(faces) == 0:
-                logging.info("Ingen personer funnet")
-                self.mqtt.send_event("check_person_result", {
-                    "found": False,
-                    "reason": "no_person_detected"
-                })
-            else:
-                # Ta første person
-                name, confidence, location = faces[0]
+            MIN_CONFIDENCE = 0.50  # 50% minimum confidence
+            MAX_ATTEMPTS = 3
+            best_result = None
+            best_confidence = 0.0
+            
+            for attempt in range(1, MAX_ATTEMPTS + 1):
+                faces = self.face_recognizer.detect_faces()
                 
-                if name == "ukjent":
-                    logging.info("👤 Ukjent person funnet")
-                    self.mqtt.send_event("unknown_person", {})
+                if faces and len(faces) > 0:
+                    name, confidence, location = faces[0]
+                    
+                    # Oppdater beste resultat
+                    if confidence > best_confidence:
+                        best_result = (name, confidence, location)
+                        best_confidence = confidence
+                    
+                    # Hvis vi har høy nok confidence, bruk det umiddelbart
+                    if confidence >= MIN_CONFIDENCE and name != "ukjent":
+                        logging.info(f"✅ Forsøk {attempt}/{MAX_ATTEMPTS}: Gjenkjent {name} ({confidence:.2%})")
+                        self.mqtt.send_event("check_person_result", {
+                            "found": True,
+                            "name": name,
+                            "confidence": confidence
+                        })
+                        break
+                    else:
+                        logging.info(f"⚠️ Forsøk {attempt}/{MAX_ATTEMPTS}: {name} ({confidence:.2%}) - for lav confidence")
                 else:
-                    logging.info(f"👋 Kjent person funnet: {name} ({confidence:.2%})")
-                    self.mqtt.send_event("face_recognized", {
-                        "name": name,
-                        "confidence": confidence
+                    logging.info(f"⚠️ Forsøk {attempt}/{MAX_ATTEMPTS}: Ingen ansikt detektert")
+                
+                # Vent litt før neste forsøk (unntatt siste)
+                if attempt < MAX_ATTEMPTS:
+                    time.sleep(0.3)
+            else:
+                # Alle forsøk feilet eller for lav confidence
+                if best_result and best_result[0] != "ukjent":
+                    logging.info(f"⚠️ Beste resultat etter {MAX_ATTEMPTS} forsøk: {best_result[0]} ({best_confidence:.2%}) - under terskel")
+                    self.mqtt.send_event("check_person_result", {
+                        "found": True,
+                        "name": best_result[0],
+                        "confidence": best_confidence
                     })
-        
+                else:
+                    logging.info("❌ Ingen person gjenkjent etter 3 forsøk")
+                    self.mqtt.send_event("check_person_result", {
+                        "found": False,
+                        "reason": "no_person_detected"
+                    })
+
         elif command == "learn_person":
             # Start læring av ny person med flere bilder for bedre nøyaktighet
             name = message.get("name")

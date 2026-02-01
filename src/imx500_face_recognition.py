@@ -88,14 +88,18 @@ class IMX500FaceRecognizer:
             # Ta bilde hvis ikke gitt
             if image is None:
                 image = self.picam2.capture_array()
+                logging.info(f"📷 Bilde tatt: shape={image.shape}, dtype={image.dtype}")
             
             start_time = time.time()
             
             # Bruk face_recognition for detection + recognition
             # (Senere kan vi optimalisere med IMX500 for detection)
+            logging.info("🔍 Kjører HOG face detection...")
             face_locations = face_recognition.face_locations(image, model="hog")
+            logging.info(f"🔍 HOG fant {len(face_locations)} ansikter")
             
             if not face_locations:
+                logging.info("⚠️ Ingen ansikter funnet av HOG model")
                 return []
             
             face_encodings = face_recognition.face_encodings(image, face_locations)
