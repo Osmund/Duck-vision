@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# Data
+data/
+*.pkl
+*.jpg
+*.png
+*.jpeg
+
+# Tests
+src/tests/
+
+# Sensitive - face recognition data
+known_faces/
+face_encodings.pkl
+face-recognition-install.log
+
+# Models
+models/*.pt
+models/*.onnx
+!models/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db

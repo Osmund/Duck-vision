@@ -1,0 +1,32 @@
+[Unit]
+Description=Duck-Vision AI Camera System
+Documentation=https://github.com/admog/Duck-Vision
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admog
+Group=admog
+WorkingDirectory=/home/admog/Code/Duck-Vision
+Environment="PATH=/home/admog/Code/Duck-Vision/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+
+# Start with system Python (has picamera2 pre-installed)
+ExecStart=/usr/bin/python3 /home/admog/Code/Duck-Vision/src/duck_vision.py
+
+# Restart on failure
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=duck-vision
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
