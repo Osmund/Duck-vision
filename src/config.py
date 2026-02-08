@@ -71,6 +71,38 @@ OBJECT_CONFIG = {
     "imx500_model": "/usr/share/imx500-models/imx500_network_nanodet_plus_416x416_pp.rpk"
 }
 
+# Speaker / Voice Recognition Settings
+KNOWN_VOICES_DIR = DATA_DIR / "known_voices"
+KNOWN_VOICES_DIR.mkdir(exist_ok=True)
+
+VOICE_CONFIG = {
+    "enabled": os.getenv("VOICE_RECOGNITION_ENABLED", "true").lower() == "true",
+    "data_dir": KNOWN_VOICES_DIR,
+    # Mikrofon
+    "mic_device": os.getenv("MIC_DEVICE", "plughw:0,0"),  # ALSA device
+    "mic_sample_rate": 48000,  # Native rate for USB PnP Sound Device
+    "target_sample_rate": 16000,  # Resemblyzer krever 16kHz
+    # VAD (Voice Activity Detection)
+    "vad_aggressiveness": int(os.getenv("VAD_AGGRESSIVENESS", "2")),  # 0-3, 3 = mest aggressiv
+    "vad_frame_ms": 30,  # 10, 20 eller 30 ms frames for WebRTC VAD
+    # Speaker matching
+    "match_threshold": float(os.getenv("SPEAKER_MATCH_THRESHOLD", "0.75")),  # Cosine similarity
+    # Automatisk profilbygging
+    "auto_enroll": os.getenv("VOICE_AUTO_ENROLL", "true").lower() == "true",
+    "min_speech_duration": float(os.getenv("MIN_SPEECH_DURATION", "10.0")),  # Sek tale for profil
+    "max_collect_duration": float(os.getenv("MAX_COLLECT_DURATION", "60.0")),  # Maks ventetid
+}
+
+# MQTT Topics for voice/audio
+TOPICS.update({
+    "speaker_recognized": os.getenv("MQTT_TOPIC_SPEAKER_RECOGNIZED", "duck/audio/speaker"),
+    "voice_profile_created": os.getenv("MQTT_TOPIC_VOICE_LEARNED", "duck/audio/voice_learned"),
+    "samantha_speaking": os.getenv("MQTT_TOPIC_SAMANTHA_SPEAKING", "duck/samantha/speaking"),
+    "samantha_conversation": os.getenv("MQTT_TOPIC_SAMANTHA_CONVERSATION", "duck/samantha/conversation"),
+})
+
 print(f"  - MQTT Broker: {MQTT_CONFIG['broker']}:{MQTT_CONFIG['port']}")
 print(f"  - Data dir: {DATA_DIR}")
 print(f"  - Known faces: {KNOWN_FACES_DIR}")
+print(f"  - Known voices: {KNOWN_VOICES_DIR}")
+print(f"  - Voice recognition: {'ON' if VOICE_CONFIG['enabled'] else 'OFF'}")

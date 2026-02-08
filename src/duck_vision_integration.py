@@ -38,7 +38,9 @@ class DuckVisionHandler:
                  on_face_detected: Optional[Callable] = None,
                  on_unknown_face: Optional[Callable] = None,
                  on_object_detected: Optional[Callable] = None,
-                 on_learning_progress: Optional[Callable] = None):
+                 on_learning_progress: Optional[Callable] = None,
+                 on_speaker_recognized: Optional[Callable] = None,
+                 on_voice_profile_created: Optional[Callable] = None):
         """
         Args:
             broker_host: MQTT broker adresse (vanligvis "localhost")
@@ -47,6 +49,8 @@ class DuckVisionHandler:
             on_unknown_face: Callback når ukjent ansikt detekteres
             on_object_detected: Callback når objekter detekteres
             on_learning_progress: Callback når face learning tar bilde (for TTS guidance)
+            on_speaker_recognized: Callback når stemme gjenkjennes (name, confidence)
+            on_voice_profile_created: Callback når stemmeprofil er opprettet (name, success)
         """
         self.broker_host = broker_host
         self.broker_port = broker_port
@@ -56,6 +60,8 @@ class DuckVisionHandler:
         self.on_unknown_face = on_unknown_face
         self.on_object_detected = on_object_detected
         self.on_learning_progress = on_learning_progress
+        self.on_speaker_recognized = on_speaker_recognized
+        self.on_voice_profile_created = on_voice_profile_created
         
         # MQTT client
         self.client = mqtt.Client()
@@ -96,7 +102,8 @@ class DuckVisionHandler:
             self.connected = True
             # Subscribe til alle Duck-Vision events
             self.client.subscribe("duck/vision/#")
-            print("✓ Subscribed til duck/vision/#")
+            self.client.subscribe("duck/audio/#")
+            print("✓ Subscribed til duck/vision/# og duck/audio/#")
         else:
             print(f"❌ MQTT connection failed: {rc}")
     
@@ -112,6 +119,10 @@ class DuckVisionHandler:
                 self._handle_object_event(payload)
             elif topic == "duck/vision/event":
                 self._handle_generic_event(payload)
+            elif topic == "duck/audio/speaker":
+                self._handle_speaker_event(payload)
+            elif topic == "duck/audio/voice_learned":
+                self._handle_voice_learned_event(payload)
                 
         except Exception as e:
             print(f"❌ Error handling MQTT message: {e}")
@@ -145,6 +156,22 @@ class DuckVisionHandler:
         # Callback
         if self.on_object_detected:
             self.on_object_detected(object_name, confidence)
+    
+    def _handle_speaker_event(self, data: dict):
+        """Håndter stemmegjenkjenning"""
+        name = data.get("name")
+        confidence = data.get("confidence", 0.0)
+        
+        if self.on_speaker_recognized:
+            self.on_speaker_recognized(name, confidence)
+    
+    def _handle_voice_learned_event(self, data: dict):
+        """Håndter ny stemmeprofil"""
+        name = data.get("name")
+        success = data.get("success", False)
+        
+        if self.on_voice_profile_created:
+            self.on_voice_profile_created(name, success)
     
     def _handle_generic_event(self, data: dict):
         """Håndter generiske events"""
@@ -318,12 +345,60 @@ class DuckVisionHandler:
         self.pending_person_name = name
     
     def forget_person(self, name: str):
-        """Be Duck-Vision om å glemme en person"""
+        """Be Duck-Vision om å glemme en person (ansikt + stemme)"""
         command = {
             "command": "forget_person",
             "name": name
         }
         self.client.publish("duck/samantha/commands", json.dumps(command))
+    
+    def learn_voice(self, name: str, duration: float = 10.0):
+        """Be Duck-Vision om manuell stemmelæring for en person"""
+        command = {
+            "command": "learn_voice",
+            "name": name,
+            "duration": duration
+        }
+        self.client.publish("duck/samantha/commands", json.dumps(command))
+    
+    # ─── Samtale-signalering ────────────────────────────────────────
+    
+    def notify_conversation_start(self):
+        """Signal til Duck-Vision at en samtale er aktiv (wake word trigget).
+        
+        Duck-Vision vil:
+        - Prioritere stemmegjenkjenning (raskere matching, lavere cooldown)
+        - Automatisk kjøre ansiktssjekk
+        - Sende speaker_recognized event så fort match er funnet
+        """
+        self.client.publish(
+            "duck/samantha/conversation",
+            json.dumps({"active": True})
+        )
+    
+    def notify_conversation_end(self):
+        """Signal til Duck-Vision at samtalen er ferdig.
+        
+        Duck-Vision vil:
+        - Prøve siste matching med all samlet tale fra samtalen
+        - Bruke samtale-audio til profil-bygging hvis aktuelt
+        - Gå tilbake til passiv lyttemodus
+        """
+        self.client.publish(
+            "duck/samantha/conversation",
+            json.dumps({"active": False})
+        )
+    
+    def notify_speaking(self, is_speaking: bool):
+        """Signal til Duck-Vision om Samantha snakker (mute mikrofon).
+        
+        Args:
+            is_speaking: True når TTS starter, False når ferdig
+        """
+        self.client.publish(
+            "duck/samantha/speaking",
+            json.dumps({"speaking": is_speaking})
+        )
     
     def list_known_people(self):
         """Be Duck-Vision om liste over kjente personer"""

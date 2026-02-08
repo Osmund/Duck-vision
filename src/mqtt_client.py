@@ -24,6 +24,18 @@ class DuckMQTT:
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
         
+        # Status topic for Samantha å vite om vi er online
+        self.STATUS_TOPIC = "duck/vision/status"
+        
+        # LWT (Last Will and Testament) - brokeren publiserer dette automatisk
+        # når klienten forsvinner uventet
+        self.client.will_set(
+            self.STATUS_TOPIC,
+            payload=json.dumps({"status": "offline"}),
+            qos=1,
+            retain=True
+        )
+        
         # Autentisering hvis konfigurert
         if MQTT_CONFIG["username"]:
             self.client.username_pw_set(
@@ -55,6 +67,17 @@ class DuckMQTT:
     
     def disconnect(self):
         """Koble fra MQTT broker"""
+        # Publiser offline-status før frakobling
+        try:
+            self.client.publish(
+                self.STATUS_TOPIC,
+                payload=json.dumps({"status": "offline"}),
+                qos=1,
+                retain=True
+            )
+            time.sleep(0.1)  # La meldingen bli sendt
+        except Exception:
+            pass
         self.client.loop_stop()
         self.client.disconnect()
         print("MQTT frakoblet")
@@ -64,9 +87,21 @@ class DuckMQTT:
         if rc == 0:
             self.connected = True
             print("✓ MQTT tilkoblet!")
+            # Publiser online-status (retained slik at Samantha vet vi er her)
+            self.client.publish(
+                self.STATUS_TOPIC,
+                payload=json.dumps({"status": "online"}),
+                qos=1,
+                retain=True
+            )
+            print("  📡 Publisert online-status til duck/vision/status")
             # Subscribe til Samantha's kommandoer
             self.client.subscribe(TOPICS["samantha_to_vision"])
+            self.client.subscribe(TOPICS["samantha_speaking"])
+            self.client.subscribe(TOPICS["samantha_conversation"])
             print(f"  Lytter på: {TOPICS['samantha_to_vision']}")
+            print(f"  Lytter på: {TOPICS['samantha_speaking']}")
+            print(f"  Lytter på: {TOPICS['samantha_conversation']}")
         else:
             print(f"❌ MQTT tilkobling feilet med kode: {rc}")
     
@@ -117,6 +152,28 @@ class DuckMQTT:
             "all_objects": all_objects or []  # Liste med alle objekter
         }
         self._publish(TOPICS["object_detected"], message)
+    
+    def send_speaker_recognized(self, name: str, confidence: float, speech_duration: float = 0.0):
+        """Send melding om stemmegjenkjenning"""
+        message = {
+            "event": "speaker_recognized",
+            "timestamp": time.time(),
+            "name": name,
+            "confidence": confidence,
+            "speech_duration": speech_duration,
+        }
+        self._publish(TOPICS["speaker_recognized"], message)
+    
+    def send_voice_profile_created(self, name: str, success: bool, speech_duration: float = 0.0):
+        """Send melding om at stemmeprofil er opprettet"""
+        message = {
+            "event": "voice_profile_created",
+            "timestamp": time.time(),
+            "name": name,
+            "success": success,
+            "speech_duration": speech_duration,
+        }
+        self._publish(TOPICS["voice_profile_created"], message)
     
     def send_event(self, event_type: str, data: Dict[str, Any]):
         """Send generisk event til Samantha"""

@@ -20,8 +20,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from imx500_face_recognition import IMX500FaceRecognizer
 from imx500_object_detection import IMX500ObjectDetector
 from openai_vision import OpenAIVision
+from speaker_recognition import SpeakerRecognition
 from mqtt_client import DuckMQTT
-from config import FACE_CONFIG, TOPICS
+from config import FACE_CONFIG, VOICE_CONFIG, TOPICS
 
 # Setup logging
 logging.basicConfig(
@@ -54,6 +55,8 @@ class DuckVision:
         self.object_detector = None  # Initialiseres etter at kamera starter
         # OpenAI Vision for dyp forståelse
         self.openai_vision = None  # Initialiseres ved første bruk
+        # Speaker recognition (passiv lytting)
+        self.speaker_recognition = None  # Initialiseres i setup()
         self.mqtt = DuckMQTT()
         
         # State
@@ -82,6 +85,18 @@ class DuckVision:
             self._handle_samantha_command
         )
         
+        # Lytt på Samantha speaking-status (mute mikrofon når hun snakker)
+        self.mqtt.register_callback(
+            TOPICS["samantha_speaking"],
+            self._handle_samantha_speaking
+        )
+        
+        # Lytt på samtale-status (samtale-modus for stemmegjenkjenning)
+        self.mqtt.register_callback(
+            TOPICS["samantha_conversation"],
+            self._handle_samantha_conversation
+        )
+        
         # Start IMX500 komponenter
         try:
             # Start face recognizer først (starter kamera)
@@ -95,6 +110,19 @@ class DuckVision:
         except Exception as e:
             print(f"❌ Kunne ikke starte IMX500: {e}")
             return False
+        
+        # Start speaker recognition (passiv lytting i bakgrunnstråd)
+        try:
+            self.speaker_recognition = SpeakerRecognition(
+                VOICE_CONFIG,
+                event_callback=self._on_speaker_event
+            )
+            self.speaker_recognition.start()
+            print(f"✓ Speaker recognition startet (passiv lytting)")
+            print(f"✓ Kjente stemmer: {len(self.speaker_recognition.list_known_speakers())}")
+        except Exception as e:
+            print(f"⚠️ Speaker recognition kunne ikke starte: {e}")
+            print(f"  (Vision fortsetter uten stemmegjenkjenning)")
         
         print(f"\n✓ Alle komponenter initialisert!")
         print(f"✓ Kjente personer: {len(self.face_recognizer.list_known_people())}")
@@ -178,6 +206,13 @@ class DuckVision:
                             "name": name,
                             "confidence": confidence
                         })
+                        
+                        # Auto-enroll stemme hvis vi ikke har profil
+                        if (self.speaker_recognition 
+                                and self.speaker_recognition.config.get("auto_enroll")
+                                and not self.speaker_recognition.has_voice_profile(name)
+                                and len(current_faces) == 1):  # Kun én person synlig
+                            self.speaker_recognition.start_auto_enroll(name)
             
             self.last_seen_faces = current_faces
             
@@ -414,10 +449,19 @@ class DuckVision:
                     # Hvis vi har høy nok confidence, bruk det umiddelbart
                     if confidence >= MIN_CONFIDENCE and name != "ukjent":
                         logging.info(f"✅ Forsøk {attempt}/{MAX_ATTEMPTS}: Gjenkjent {name} ({confidence:.2%})")
+                        
+                        # Sjekk om vi har stemmeprofil, start auto-enroll hvis ikke
+                        has_voice = False
+                        if self.speaker_recognition:
+                            has_voice = self.speaker_recognition.has_voice_profile(name)
+                            if not has_voice and self.speaker_recognition.config.get("auto_enroll"):
+                                self.speaker_recognition.start_auto_enroll(name)
+                        
                         self.mqtt.send_event("check_person_result", {
                             "found": True,
                             "name": name,
-                            "confidence": confidence
+                            "confidence": confidence,
+                            "has_voice_profile": has_voice
                         })
                         break
                     else:
@@ -456,11 +500,38 @@ class DuckVision:
                 logging.info(f"     Tar {num_samples} bilder for best mulig accuracy")
                 logging.info(f"     💡 Beveg hodet litt mellom bildene!")
         
+        elif command == "learn_voice":
+            # Manuell stemmelæring
+            name = message.get("name")
+            duration = message.get("duration", 10.0)
+            if name and self.speaker_recognition:
+                logging.info(f"🎤 Starter manuell stemmelæring for {name} ({duration}s)")
+                success = self.speaker_recognition.learn_voice(name, duration)
+                self.mqtt.send_voice_profile_created(name, success)
+            elif not self.speaker_recognition:
+                logging.warning("⚠️ Speaker recognition ikke tilgjengelig")
+                self.mqtt.send_event("error", {"message": "Speaker recognition not available"})
+        
+        elif command == "save_conversation_voice":
+            # Lag stemmeprofil fra samtale-audio (uten ekstra opptak)
+            name = message.get("name")
+            if name and self.speaker_recognition:
+                logging.info(f"🎤 Lager stemmeprofil for {name} fra samtale-audio")
+                success = self.speaker_recognition.create_profile_from_conversation(name)
+                duration = 0.0  # Ikke relevant for samtale-basert profil
+                self.mqtt.send_voice_profile_created(name, success, duration)
+            elif not self.speaker_recognition:
+                logging.warning("⚠️ Speaker recognition ikke tilgjengelig")
+                self.mqtt.send_event("error", {"message": "Speaker recognition not available"})
+        
         elif command == "forget_person":
-            # Fjern person fra database
+            # Fjern person fra database (ansikt + stemme)
             name = message.get("name")
             if name:
                 success = self.face_recognizer.forget_person(name)
+                # Fjern også stemmeprofil
+                if self.speaker_recognition:
+                    self.speaker_recognition.forget_speaker(name)
                 self.mqtt.send_event("person_forgotten", {
                     "name": name,
                     "success": success
@@ -482,11 +553,64 @@ class DuckVision:
         else:
             logging.warning(f"  ⚠️  Ukjent kommando: {command}")
     
+    def _handle_samantha_speaking(self, message: dict):
+        """Mute/unmute mikrofon når Samantha snakker/er stille"""
+        speaking = message.get("speaking", False)
+        if self.speaker_recognition:
+            if speaking:
+                self.speaker_recognition.mute()
+            else:
+                self.speaker_recognition.unmute()
+    
+    def _handle_samantha_conversation(self, message: dict):
+        """Start/stopp samtale-modus.
+        
+        Når samtale starter (wake word):
+        - Aktiver samtale-modus for stemmegjenkjenning (raskere matching)
+        - Kjør ansiktssjekk automatisk (begge modaliteter jobber parallelt)
+        """
+        active = message.get("active", False)
+        if active:
+            logging.info("💬 Samtale startet - kjører identifisering")
+            
+            # Start samtale-modus for stemmegjenkjenning
+            if self.speaker_recognition:
+                self.speaker_recognition.start_conversation()
+            
+            # Proaktiv ansiktssjekk - vi vet at noen er der
+            self._check_faces()
+        else:
+            logging.info("💬 Samtale avsluttet")
+            if self.speaker_recognition:
+                self.speaker_recognition.end_conversation()
+    
+    def _on_speaker_event(self, event_type: str, data: dict):
+        """Callback fra speaker recognition"""
+        if event_type == "speaker_recognized":
+            name = data.get("name")
+            confidence = data.get("confidence", 0)
+            duration = data.get("speech_duration", 0)
+            source = data.get("source", "passive")
+            logging.info(f"🔊 Stemme gjenkjent: {name} ({confidence:.2%}, {source})")
+            self.mqtt.send_speaker_recognized(name, confidence, duration)
+        
+        elif event_type == "voice_profile_created":
+            name = data.get("name")
+            success = data.get("success", False)
+            duration = data.get("speech_duration", 0)
+            if success:
+                logging.info(f"✅ Stemmeprofil opprettet for {name}")
+            else:
+                logging.warning(f"❌ Stemmeprofil feilet for {name}")
+            self.mqtt.send_voice_profile_created(name, success, duration)
+    
     def shutdown(self):
         """Rydd opp og stopp systemet"""
         logging.info("\n\n🛑 Stopper Duck-Vision...")
         self.running = False
         
+        if self.speaker_recognition:
+            self.speaker_recognition.stop()
         self.face_recognizer.stop()
         if hasattr(self.object_detector, 'stop'):
             self.object_detector.stop()
