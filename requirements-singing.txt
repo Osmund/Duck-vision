@@ -1,0 +1,23 @@
+# Singing Duck dependencies
+# Installer: pip install -r requirements-singing.txt
+
+# LLM (sangskriving)
+openai>=1.0
+
+# TTS
+azure-cognitiveservices-speech>=1.37
+
+# Vocoder (pitch-shifting)
+pyworld>=0.3.4
+soundfile>=0.12
+
+# MIDI
+midiutil>=1.2.1
+mido>=1.3
+
+# MQTT
+paho-mqtt>=2.0
+
+# General
+numpy>=1.24
+python-dotenv>=1.0
