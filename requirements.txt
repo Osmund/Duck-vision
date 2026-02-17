@@ -9,6 +9,7 @@
 #   sudo apt install -y imx500-all
 #   sudo apt install -y libportaudio2 portaudio19-dev libcap-dev
 #   sudo apt install -y cmake build-essential libopenblas-dev liblapack-dev
+#   sudo apt install -y fluidsynth fluid-soundfont-gm  # for Singing Duck
 
 # MQTT Communication
 paho-mqtt==2.1.0

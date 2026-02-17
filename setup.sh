@@ -37,7 +37,7 @@ sudo apt-get install -y -qq \
     libportaudio2 portaudio19-dev libsndfile1 \
     libcap-dev \
     cmake build-essential libopenblas-dev liblapack-dev \
-    git mosquitto-clients \
+    git mosquitto-clients \n    fluidsynth fluid-soundfont-gm \
     2>&1 | tail -3
 echo "   ✅ System-pakker OK"
 echo ""

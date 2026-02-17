@@ -1,0 +1,21 @@
+[Unit]
+Description=Duck Singing Service - AI Song Generator
+After=network-online.target duck-vision.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admog
+Group=admog
+WorkingDirectory=/home/admog/Code/Duck-vision
+Environment="PATH=/home/admog/Code/Duck-vision/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/home/admog/Code/Duck-vision/.venv/bin/python3 -m src.singing.song_service
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=duck-singing
+
+[Install]
+WantedBy=multi-user.target
