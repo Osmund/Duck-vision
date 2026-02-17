@@ -191,10 +191,9 @@ class SongService:
             # ── 2. MIDI fra sang-data ──
             midi_path = self.midi_builder.build(song_data, work / "song.mid")
 
-            # ── 3. Azure TTS med visemes ──
+            # ── 3. Azure TTS med sang-synkronisering ──
             self._publish_status("synthesizing", "Syntetiserer stemme...")
-            lyrics = " ".join(v["lyrics"] for v in song_data["verses"])
-            tts_result = self.tts.synthesize(lyrics, work / "tts.wav")
+            tts_result = self.tts.synthesize_song(song_data, work / "tts.wav")
             t2 = time.monotonic()
             logger.info(f"  🗣️ TTS ferdig ({t2-t1:.1f}s)")
 
@@ -202,18 +201,23 @@ class SongService:
             with open(work / "visemes.json", "w") as f:
                 json.dump(tts_result.visemes, f)
 
-            # ── 4. Singify (pyworld) ──
+            # ── 4. Singify (pyworld) med tidssynkronisering ──
             self._publish_status("singing", "Gjør tale om til sang...")
             vocals_path = self.singify.process(
                 tts_result.audio_path, midi_path, work / "vocals.wav",
-                word_boundaries=tts_result.word_boundaries
+                word_boundaries=tts_result.word_boundaries,
+                song_data=song_data
             )
             t3 = time.monotonic()
             logger.info(f"  🎤 Singify ferdig ({t3-t2:.1f}s)")
 
-            # ── 5. Instrumental ──
+            # ── 5. Instrumental ved original tempo ──
+            # Med rubberband pitch-shift beholder vokalen sin varighet,
+            # så instrumentalen rendres ved original tempo.
             self._publish_status("mixing", "Legger til musikk...")
-            inst_path = self.instrumental.render(midi_path, work / "instrumental.wav")
+            inst_path = self.instrumental.render(
+                midi_path, work / "instrumental.wav"
+            )
             t4 = time.monotonic()
             logger.info(f"  🎹 Instrumental ferdig ({t4-t3:.1f}s)")
 
@@ -247,12 +251,15 @@ class SongService:
         """
         Lag duck_mix.wav (stereo vokal+instrumental) og
         vocals_duck.wav (stereo vokal alene, for nebb-analyse).
-        Matcher formatet eksisterende sanger bruker.
-        Singify gjør allerede duck-pitch i sitt ene vocoding-pass,
-        så vi trenger IKKE andifisering her.
-        Synkroniserer vokal med instrumental varighet.
+
+        Synkronisering:
+          - Singify har allerede time-alignet vokalen til MIDI-tempo
+          - Instrumentalen er rendret ved duck-justert tempo
+          - Etter duck pitch-shift er vokal og instrumental i sync
+
+        Andifisering: rubberband pitch-shift bevarer varighet og formanter.
         """
-        from scipy.signal import resample
+        import pyrubberband as pyrb
 
         vocals, v_sr = sf.read(str(vocals_path))
         inst, i_sr = sf.read(str(inst_path))
@@ -263,26 +270,23 @@ class SongService:
         if len(inst.shape) > 1:
             inst = inst.mean(axis=1)
 
-        # ── Andifisering med resampling (samme metode som Pi 4) ──
-        # Resample til færre samples = høyere pitch når spilt på original sample rate
-        # "Alvin og gjengen"-effekten — enkel og bra lydkvalitet
-        DUCK_PITCH_OCTAVES = 0.5  # 0.5 oktav opp
-        pitch_factor = 2.0 ** DUCK_PITCH_OCTAVES  # 1.414x
+        # ── Andifisering med rubberband (høy kvalitet, bevarer formanter) ──
+        DUCK_PITCH_SEMITONES = 1.0  # Svært mild and-stemme
 
         # Normaliser amplitude først
         peak_before = np.max(np.abs(vocals))
         if peak_before > 0.01:
             vocals = vocals / peak_before * 0.90
 
-        new_length = int(len(vocals) / pitch_factor)
-        vocals = resample(vocals, new_length).astype(np.float32)
+        # Rubberband pitch-shift: bevarer varighet OG formanter
+        vocals = pyrb.pitch_shift(vocals, v_sr, DUCK_PITCH_SEMITONES).astype(np.float32)
 
-        # Sjekk for clipping etter resampling
+        # Sjekk for clipping
         peak = np.max(np.abs(vocals))
         if peak > 0.95:
             vocals = vocals / peak * 0.95
 
-        logger.info(f"  🦆 Andifisering: {DUCK_PITCH_OCTAVES} oktaver opp (resampling, {pitch_factor:.2f}x)")
+        logger.info(f"  🦆 Andifisering: +{DUCK_PITCH_SEMITONES} halvtoner opp (rubberband, formant-bevaring)")
 
         # ── Karaoke-klang (reverb) på vokalen ──
         reverb_delays = [
@@ -304,33 +308,12 @@ class SongService:
             vocals = vocals / peak * 0.95
         logger.info(f"  🎤 Karaoke-klang lagt til (5 refleksjoner)")
 
-        # ── Synkroniser instrumental til andifisert vokal-lengde ──
-        # VIKTIG: Vokalen er nå kortere pga pitch-shift. Vi tilpasser
-        # instrumentalen til vokalen — ALDRI strekk vokalen tilbake,
-        # for det reverserer pitch-shiften!
+        # ── Synkroniser lengder ──
+        # Instrumentalen er rendret ved duck-justert tempo, så den
+        # skal matche den andifiserte vokalen godt. Finjuster lengder.
         vocal_dur = len(vocals) / v_sr
         inst_dur = len(inst) / i_sr
         logger.info(f"  ⏱️ Vokal: {vocal_dur:.1f}s (andifisert), Instrumental: {inst_dur:.1f}s")
-
-        if inst_dur > vocal_dur * 1.5:
-            # Instrumental MYE lengre → trim med god margin + fade out
-            target_dur = vocal_dur + 3.0  # 3s outro
-            target_len = int(target_dur * i_sr)
-            inst = inst[:target_len]
-            fade_samples = int(1.0 * i_sr)
-            if len(inst) > fade_samples:
-                fade = np.linspace(1.0, 0.0, fade_samples)
-                inst[-fade_samples:] *= fade
-            logger.info(f"  ✂️ Instrumental trimmet: {inst_dur:.1f}s → {target_dur:.1f}s")
-        elif vocal_dur > inst_dur + 2.0:
-            # Vokal lengre → stretch instrumentalen (ikke vokalen!)
-            target_samples = int(len(inst) * vocal_dur / inst_dur)
-            inst = np.interp(
-                np.linspace(0, len(inst) - 1, target_samples),
-                np.arange(len(inst)),
-                inst
-            )
-            logger.info(f"  ⏱️ Instrumental strukket: {inst_dur:.1f}s → {vocal_dur:.1f}s")
 
         # Resample alt til target sample rate
         target_sr = SAMPLE_RATE  # 48kHz for HiFiBerry DAC
@@ -345,6 +328,17 @@ class SongService:
                 np.arange(len(inst)), inst
             )
 
+        # Trim instrumental hvis den er mye lengre (outro-noter utover siste vokal)
+        if len(inst) > len(vocals) * 1.3:
+            target_len = len(vocals) + int(2.0 * target_sr)  # 2s outro
+            if target_len < len(inst):
+                fade_samples = int(1.0 * target_sr)
+                inst = inst[:target_len]
+                if len(inst) > fade_samples:
+                    fade = np.linspace(1.0, 0.0, fade_samples)
+                    inst[-fade_samples:] *= fade
+                logger.info(f"  ✂️ Instrumental trimmet til {target_len/target_sr:.1f}s")
+
         # Pad til lik lengde
         max_len = max(len(vocals), len(inst))
         if len(vocals) < max_len:
@@ -353,7 +347,7 @@ class SongService:
             inst = np.pad(inst, (0, max_len - len(inst)))
 
         # Mix: vokal tydelig foran instrumental
-        mix_mono = vocals * 1.5 + inst * 0.35
+        mix_mono = vocals * 1.5 + inst * 0.20
         max_val = np.max(np.abs(mix_mono))
         if max_val > 0.99:
             mix_mono = mix_mono / max_val * 0.95

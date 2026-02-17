@@ -1,8 +1,8 @@
 """
 MIDI Builder - konverterer LLM-generert sang-data til MIDI-fil.
-Lager to spor: vokal-melodi og akkord-komp.
-"""
+Lager to spor: vokal-melodi og akkord-komp med variasjon."""
 
+import random
 from midiutil import MIDIFile
 from pathlib import Path
 import logging
@@ -77,13 +77,63 @@ class MidiBuilder:
         # Spor 1: Komp (flere instrumenter + trommer)
         midi.addTrackName(1, 0, "Band")
         midi.addTempo(1, 0, tempo)
-        # Kanal 1: Akustisk gitar (program 25)
-        midi.addProgramChange(1, 1, 0, 25)
-        # Kanal 2: Bass (program 33 = fingered bass)
-        midi.addProgramChange(1, 2, 0, 33)
-        # Kanal 3: Strings pad (program 48)
-        midi.addProgramChange(1, 3, 0, 48)
-        # Kanal 9: Trommer (GM standard, ingen programChange nødvendig)
+
+        # Velg tilfeldig stil for variasjon
+        STYLES = [
+            {  # Pop
+                "name": "Pop",
+                "chord_prog": 25,   # Akustisk gitar
+                "bass_prog": 33,    # Fingered bass
+                "pad_prog": 48,     # Strings
+                "drum_pattern": "standard",
+            },
+            {  # Funk
+                "name": "Funk",
+                "chord_prog": 1,    # Bright Piano
+                "bass_prog": 34,    # Pick bass
+                "pad_prog": 80,     # Square synth
+                "drum_pattern": "funky",
+            },
+            {  # Ballade
+                "name": "Ballade",
+                "chord_prog": 0,    # Grand Piano
+                "bass_prog": 32,    # Acoustic bass
+                "pad_prog": 49,     # String Ensemble 2
+                "drum_pattern": "soft",
+            },
+            {  # Latin
+                "name": "Latin",
+                "chord_prog": 24,   # Nylon guitar
+                "bass_prog": 33,    # Fingered bass
+                "pad_prog": 11,     # Vibraphone
+                "drum_pattern": "latin",
+            },
+            {  # Reggae
+                "name": "Reggae",
+                "chord_prog": 4,    # Electric Piano
+                "bass_prog": 33,    # Fingered bass
+                "pad_prog": 16,     # Drawbar Organ
+                "drum_pattern": "reggae",
+            },
+            {  # Rock
+                "name": "Rock",
+                "chord_prog": 29,   # Overdriven Guitar
+                "bass_prog": 34,    # Pick bass
+                "pad_prog": 89,     # Warm Pad
+                "drum_pattern": "rock",
+            },
+        ]
+
+        style = random.choice(STYLES)
+        logger.info(f"  🎶 Stil: {style['name']}")
+
+        # Kanal 1: Akkord-instrument
+        midi.addProgramChange(1, 1, 0, style["chord_prog"])
+        # Kanal 2: Bass
+        midi.addProgramChange(1, 2, 0, style["bass_prog"])
+        # Kanal 3: Pad/lead
+        midi.addProgramChange(1, 3, 0, style["pad_prog"])
+        # Kanal 9: Trommer (GM standard)
 
         # Skriv vokal-noter
         beat_pos = 0.0
@@ -144,12 +194,6 @@ class MidiBuilder:
                 )
 
         # ── Kanal 9: Trommer (GM drums) ──
-        # Enkel beat: kick, snare, hihat
-        KICK = 36    # Bass Drum 1
-        SNARE = 38   # Acoustic Snare
-        HIHAT_C = 42 # Closed Hi-Hat
-        HIHAT_O = 46 # Open Hi-Hat
-
         # Finn total lengde — bruk maks av vokal-noter og akkorder
         total_beats_chords = 0
         for chord_data in song_data["chords"]:
@@ -189,30 +233,22 @@ class MidiBuilder:
 
         # Generer drum-pattern for hele sangen
         beat = 0.0
+        drum_pattern = style["drum_pattern"]
         while beat < total_beats:
-            # Kick på 1 og 3
-            midi.addNote(track=1, channel=9, pitch=KICK,
-                         time=beat, duration=0.5, volume=95)
-            if beat + 2 < total_beats:
-                midi.addNote(track=1, channel=9, pitch=KICK,
-                             time=beat + 2, duration=0.5, volume=85)
-
-            # Snare på 2 og 4
-            if beat + 1 < total_beats:
-                midi.addNote(track=1, channel=9, pitch=SNARE,
-                             time=beat + 1, duration=0.5, volume=90)
-            if beat + 3 < total_beats:
-                midi.addNote(track=1, channel=9, pitch=SNARE,
-                             time=beat + 3, duration=0.5, volume=85)
-
-            # Hi-hat på hver 8-del
-            for eighth in range(8):
-                hh_time = beat + eighth * 0.5
-                if hh_time < total_beats:
-                    hh_vel = 70 if eighth % 2 == 0 else 55
-                    midi.addNote(track=1, channel=9, pitch=HIHAT_C,
-                                 time=hh_time, duration=0.25, volume=hh_vel)
-
+            if drum_pattern == "standard":
+                self._drums_standard(midi, beat, total_beats)
+            elif drum_pattern == "funky":
+                self._drums_funky(midi, beat, total_beats)
+            elif drum_pattern == "soft":
+                self._drums_soft(midi, beat, total_beats)
+            elif drum_pattern == "latin":
+                self._drums_latin(midi, beat, total_beats)
+            elif drum_pattern == "reggae":
+                self._drums_reggae(midi, beat, total_beats)
+            elif drum_pattern == "rock":
+                self._drums_rock(midi, beat, total_beats)
+            else:
+                self._drums_standard(midi, beat, total_beats)
             beat += 4.0  # Neste takt
 
         output_path = Path(output_path)
@@ -222,3 +258,90 @@ class MidiBuilder:
 
         logger.info(f"  🎼 MIDI skrevet: {output_path} ({beat_pos:.0f} beats)")
         return output_path
+
+    # ── Drum patterns ──
+    KICK = 36
+    SNARE = 38
+    HIHAT_C = 42
+    HIHAT_O = 46
+    CLAP = 39
+    RIMSHOT = 37
+    CONGA_H = 63
+    CONGA_L = 64
+    COWBELL = 56
+    RIDE = 51
+    TOM_H = 50
+    TOM_L = 45
+
+    def _add_drum(self, midi, pitch, time, total, vol=80, dur=0.25):
+        if time < total:
+            midi.addNote(track=1, channel=9, pitch=pitch,
+                         time=time, duration=dur, volume=vol)
+
+    def _drums_standard(self, midi, beat, total):
+        """Standard pop-beat."""
+        self._add_drum(midi, self.KICK, beat, total, 95)
+        self._add_drum(midi, self.KICK, beat + 2, total, 85)
+        self._add_drum(midi, self.SNARE, beat + 1, total, 90)
+        self._add_drum(midi, self.SNARE, beat + 3, total, 85)
+        for e in range(8):
+            vel = 70 if e % 2 == 0 else 55
+            self._add_drum(midi, self.HIHAT_C, beat + e * 0.5, total, vel)
+
+    def _drums_funky(self, midi, beat, total):
+        """Funky beat med synkopering."""
+        self._add_drum(midi, self.KICK, beat, total, 95)
+        self._add_drum(midi, self.KICK, beat + 1.5, total, 80)
+        self._add_drum(midi, self.KICK, beat + 2.5, total, 75)
+        self._add_drum(midi, self.SNARE, beat + 1, total, 90)
+        self._add_drum(midi, self.SNARE, beat + 3, total, 85)
+        self._add_drum(midi, self.CLAP, beat + 1, total, 60)
+        for e in range(16):
+            vel = 65 if e % 2 == 0 else 45
+            self._add_drum(midi, self.HIHAT_C, beat + e * 0.25, total, vel)
+        self._add_drum(midi, self.HIHAT_O, beat + 3.75, total, 60)
+
+    def _drums_soft(self, midi, beat, total):
+        """Myk ballade — minimal, luftig."""
+        self._add_drum(midi, self.KICK, beat, total, 70)
+        self._add_drum(midi, self.KICK, beat + 2, total, 60)
+        self._add_drum(midi, self.RIMSHOT, beat + 1, total, 55)
+        self._add_drum(midi, self.RIMSHOT, beat + 3, total, 50)
+        for e in range(4):
+            self._add_drum(midi, self.RIDE, beat + e, total, 45)
+
+    def _drums_latin(self, midi, beat, total):
+        """Latin/bossa nova med conga."""
+        self._add_drum(midi, self.KICK, beat, total, 85)
+        self._add_drum(midi, self.KICK, beat + 2.5, total, 75)
+        self._add_drum(midi, self.RIMSHOT, beat + 1, total, 70)
+        self._add_drum(midi, self.RIMSHOT, beat + 3, total, 65)
+        self._add_drum(midi, self.CONGA_H, beat + 0.5, total, 70)
+        self._add_drum(midi, self.CONGA_L, beat + 1.5, total, 65)
+        self._add_drum(midi, self.CONGA_H, beat + 2.5, total, 60)
+        self._add_drum(midi, self.CONGA_L, beat + 3.5, total, 55)
+        for e in range(8):
+            self._add_drum(midi, self.HIHAT_C, beat + e * 0.5, total, 50)
+
+    def _drums_reggae(self, midi, beat, total):
+        """Reggae — betontoner på bakslag."""
+        self._add_drum(midi, self.KICK, beat + 1.5, total, 90)
+        self._add_drum(midi, self.KICK, beat + 3.5, total, 80)
+        self._add_drum(midi, self.RIMSHOT, beat + 1, total, 85)
+        self._add_drum(midi, self.RIMSHOT, beat + 3, total, 80)
+        self._add_drum(midi, self.HIHAT_C, beat + 0.5, total, 60)
+        self._add_drum(midi, self.HIHAT_C, beat + 1.5, total, 55)
+        self._add_drum(midi, self.HIHAT_C, beat + 2.5, total, 60)
+        self._add_drum(midi, self.HIHAT_C, beat + 3.5, total, 55)
+
+    def _drums_rock(self, midi, beat, total):
+        """Rock — tung kick, crashende hihat."""
+        self._add_drum(midi, self.KICK, beat, total, 100)
+        self._add_drum(midi, self.KICK, beat + 1.5, total, 85)
+        self._add_drum(midi, self.KICK, beat + 2, total, 95)
+        self._add_drum(midi, self.SNARE, beat + 1, total, 95)
+        self._add_drum(midi, self.SNARE, beat + 3, total, 95)
+        for e in range(8):
+            vel = 80 if e % 2 == 0 else 60
+            h = self.HIHAT_O if e in (3, 7) else self.HIHAT_C
+            self._add_drum(midi, h, beat + e * 0.5, total, vel)

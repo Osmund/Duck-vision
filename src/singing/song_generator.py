@@ -44,7 +44,7 @@ class SongGenerator:
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.7,
-                    max_tokens=4000,
+                    max_tokens=8000,
                 )
 
                 raw = response.choices[0].message.content
@@ -64,14 +64,15 @@ class SongGenerator:
                 last_error = e
                 logger.warning(f"  ⚠️ Forsøk {attempt+1}: {e}")
                 if raw:
-                    logger.warning(f"  Nøkler: {list(json.loads(raw).keys()) if raw.startswith('{') else raw[:200]}")
-                    # Logg første vers-struktur for debugging
+                    # Logg nøkler (med truncated-fix for trygg parsing)
                     try:
-                        d = json.loads(raw)
+                        fixed = self._close_truncated_json(raw)
+                        d = json.loads(fixed)
+                        logger.warning(f"  Nøkler: {list(d.keys())}")
                         if "verses" in d and d["verses"]:
                             logger.warning(f"  Vers 0 nøkler: {list(d['verses'][0].keys())}")
-                    except:
-                        pass
+                    except Exception:
+                        logger.warning(f"  Raw start: {raw[:200]}")
                 if attempt == 0:
                     continue
                 raise last_error
@@ -142,6 +143,23 @@ class SongGenerator:
                         for i, w in enumerate(words)
                     ]
                     logger.warning(f"  ⚠️ Genererte {len(verse['notes'])} placeholder-noter fra lyrics")
+
+                # Sørg for at lyrics alltid finnes
+                if "lyrics" not in verse or not verse.get("lyrics"):
+                    if "notes" in verse and verse["notes"]:
+                        # Bygg lyrics fra note-lyric-felter
+                        words = [n.get("lyric", "") for n in verse["notes"] if n.get("lyric")]
+                        if words:
+                            verse["lyrics"] = " ".join(words)
+                        else:
+                            verse["lyrics"] = "la la la"
+                        logger.warning(f"  ⚠️ Rekonstruerte lyrics fra noter: '{verse['lyrics'][:60]}'")
+                    else:
+                        verse["lyrics"] = "la la la"
+
+                # Sørg for at type finnes
+                if "type" not in verse:
+                    verse["type"] = "verse"
 
         return data
 
