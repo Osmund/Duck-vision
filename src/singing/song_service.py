@@ -377,10 +377,7 @@ class SongService:
         """SCP duck_mix.wav og vocals_duck.wav til Pi 4 musikk-mappe."""
         remote_dir = f"{ANDA_MUSIKK_DIR}/{folder_name}"
 
-        if not ANDA_SSH_PASS:
-            logger.warning("⚠️ ANDA_SSH_PASS ikke satt, kan ikke levere via SCP")
-            logger.warning("  Filer ligger i: {mix_path.parent}")
-            return str(mix_path.parent)
+        # SSH key auth støttes — ANDA_SSH_PASS er valgfritt
 
         try:
             # Opprett mappe på anda
@@ -398,23 +395,27 @@ class SongService:
             raise
 
     def _ssh_cmd(self, cmd: str):
-        """Kjør en kommando på anda via SSH."""
-        subprocess.run(
-            ["sshpass", "-p", ANDA_SSH_PASS, "ssh",
-             "-o", "StrictHostKeyChecking=no",
-             f"{ANDA_USER}@{ANDA_HOST}", cmd],
-            check=True, timeout=10, capture_output=True
-        )
+        """Kjør en kommando på anda via SSH (key eller sshpass)."""
+        ssh_base = ["ssh", "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes",
+                    f"{ANDA_USER}@{ANDA_HOST}", cmd]
+        if ANDA_SSH_PASS:
+            ssh_base = ["sshpass", "-p", ANDA_SSH_PASS] +                        ["ssh", "-o", "StrictHostKeyChecking=no",
+                        f"{ANDA_USER}@{ANDA_HOST}", cmd]
+        subprocess.run(ssh_base, check=True, timeout=10, capture_output=True)
 
     def _scp_file(self, local_path: Path, remote_path: str):
-        """Kopier en fil til anda via SCP."""
-        subprocess.run(
-            ["sshpass", "-p", ANDA_SSH_PASS, "scp",
-             "-o", "StrictHostKeyChecking=no",
-             str(local_path),
-             f"{ANDA_USER}@{ANDA_HOST}:{remote_path}"],
-            check=True, timeout=60, capture_output=True
-        )
+        """Kopier en fil til anda via SCP (key eller sshpass)."""
+        scp_base = ["scp", "-o", "StrictHostKeyChecking=no",
+                    "-o", "BatchMode=yes",
+                    str(local_path),
+                    f"{ANDA_USER}@{ANDA_HOST}:{remote_path}"]
+        if ANDA_SSH_PASS:
+            scp_base = ["sshpass", "-p", ANDA_SSH_PASS,
+                        "scp", "-o", "StrictHostKeyChecking=no",
+                        str(local_path),
+                        f"{ANDA_USER}@{ANDA_HOST}:{remote_path}"]
+        subprocess.run(scp_base, check=True, timeout=60, capture_output=True)
 
     def _publish_status(self, status: str, message: str):
         """Publiser status-oppdatering."""
