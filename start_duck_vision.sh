@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start Duck-Vision med venv Python (har alle packages vi trenger)
 
-cd /home/admog/Code/Duck-Vision
+cd /home/admog/Code/Duck-vision
 
 echo "🦆 Starting Duck-Vision System..."
 echo "=================================="

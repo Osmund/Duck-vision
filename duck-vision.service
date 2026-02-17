@@ -8,12 +8,12 @@ Wants=network-online.target
 Type=simple
 User=admog
 Group=admog
-WorkingDirectory=/home/admog/Code/Duck-Vision
-Environment="PATH=/home/admog/Code/Duck-Vision/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+WorkingDirectory=/home/admog/Code/Duck-vision
+Environment="PATH=/home/admog/Code/Duck-vision/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONUNBUFFERED=1"
 
 # Start with system Python (has picamera2 pre-installed)
-ExecStart=/usr/bin/python3 /home/admog/Code/Duck-Vision/src/duck_vision.py
+ExecStart=/home/admog/Code/Duck-vision/.venv/bin/python3 /home/admog/Code/Duck-vision/src/duck_vision.py
 
 # Restart on failure
 Restart=always

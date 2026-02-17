@@ -86,7 +86,7 @@ VOICE_CONFIG = {
     "vad_aggressiveness": int(os.getenv("VAD_AGGRESSIVENESS", "2")),  # 0-3, 3 = mest aggressiv
     "vad_frame_ms": 30,  # 10, 20 eller 30 ms frames for WebRTC VAD
     # Speaker matching
-    "match_threshold": float(os.getenv("SPEAKER_MATCH_THRESHOLD", "0.75")),  # Cosine similarity
+    "match_threshold": float(os.getenv("SPEAKER_MATCH_THRESHOLD", "0.70")),  # Cosine similarity
     # Automatisk profilbygging
     "auto_enroll": os.getenv("VOICE_AUTO_ENROLL", "true").lower() == "true",
     "min_speech_duration": float(os.getenv("MIN_SPEECH_DURATION", "10.0")),  # Sek tale for profil

@@ -1,65 +1,76 @@
 # Quick Reference: Duck-Vision Service
 
-## 🚀 Start Duck-Vision Service
+## 🚀 Fersk installasjon (fra scratch)
 
-### First Time Setup:
 ```bash
-cd /home/admog/Code/Duck-Vision
-./install_service.sh
+cd ~/Code
+git clone https://github.com/Osmund/Duck-vision.git
+cd Duck-vision
+./setup.sh                    # Installerer ALT automatisk
+nano .env                     # Legg inn API-nøkler
+```
+
+## 👤 Registrer ansikt og stemme
+
+```bash
+source .venv/bin/activate
+
+# Stopp tjenesten først (frigjør kameraet)
+sudo systemctl stop duck-vision
+
+# Ansikt: 5 bilder, du trykker ENTER mellom hvert
+python3 scripts/register_face.py "Åsmund"
+
+# Stemme: 3 tekster, du leser høyt
+python3 scripts/register_voice.py "Åsmund"
+
+# Test at du blir gjenkjent
+python3 scripts/test_recognition.py
+
+# Start tjenesten igjen
 sudo systemctl start duck-vision
 ```
 
-### Daily Commands:
+## 🔧 Tjeneste-kommandoer
+
 ```bash
-# View status
-sudo systemctl status duck-vision
-
-# View live logs
-sudo journalctl -u duck-vision -f
-
-# Restart
-sudo systemctl restart duck-vision
-
-# Stop
-sudo systemctl stop duck-vision
+sudo systemctl start duck-vision      # Start
+sudo systemctl stop duck-vision       # Stopp
+sudo systemctl restart duck-vision    # Restart
+sudo systemctl status duck-vision     # Status
+sudo journalctl -u duck-vision -f     # Live logger
 ```
 
-## 📁 Important Paths
+## 📁 Viktige stier
 
-- **Source code:** `src/`
-- **Documentation:** `docs/`
-- **Demos & tests:** `demos/`
-- **Data storage:** `data/known_faces/`, `data/logs/`
-- **Configuration:** `.env`
-- **Service file:** `duck-vision.service`
+- **Kildekode:** `src/`
+- **Skript:** `scripts/` (register_face, register_voice, test_recognition)
+- **Demoer:** `demos/`
+- **Ansiktsdata:** `data/known_faces/`
+- **Stemmeprofiler:** `data/known_voices/`
+- **Konfigurasjon:** `.env`
+- **Service-fil:** `duck-vision.service`
 
-## 🔧 Development
+## ⚙️ .env konfigurasjon
 
-### Manual start (without service):
-```bash
-./start_duck_vision.sh
+```ini
+# MQTT (broker kjører på Pi 4)
+MQTT_BROKER=oduckberry-2.local
+MQTT_PORT=1883
+
+# API-nøkler
+OPENAI_API_KEY=sk-...
+AZURE_TTS_KEY=...
+AZURE_TTS_REGION=westeurope
 ```
 
-### Run demos:
-```bash
-python3 demos/demo_imx500.py
-python3 demos/demo_face_detection.py
-```
+## 📚 Full dokumentasjon
 
-### View configuration:
-```bash
-cat .env
-python3 src/config.py
-```
-
-## 📚 Full Documentation
-
-See `docs/` folder for complete documentation:
-- `INTEGRATION_GUIDE.md` - Pi 4 integration
-- `ARKITEKTUR_ANBEFALINGER.md` - Architecture decisions
-- `INSTALLATION_STATUS.md` - Installation checklist
-- `CLEANUP_STATUS.md` - Project reorganization details
+Se `docs/`-mappen:
+- `INTEGRATION_GUIDE.md` - Pi 4 integrasjon
+- `ARKITEKTUR_ANBEFALINGER.md` - Arkitekturbeslutninger
+- `INSTALLATION_STATUS.md` - Installasjon-sjekkliste
 
 ---
 
-**Quick start:** `./install_service.sh && sudo systemctl start duck-vision` 🦆⚡
+**Rask start:** `./setup.sh && sudo systemctl start duck-vision` 🦆⚡

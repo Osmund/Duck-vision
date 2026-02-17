@@ -7,6 +7,8 @@ Ultra-low latency AI vision system for Raspberry Pi 5 with Sony IMX500 AI Camera
 Duck-Vision leverages the **IMX500 AI Camera's on-chip neural network processor** to achieve:
 - **0.6ms object detection** (417x faster than CPU-based YOLOv8!)
 - **10-30ms face recognition** (hybrid: IMX500 detection + CPU matching)
+- **Stemmegjenkjenning** (Resemblyzer d-vectors + WebRTC VAD)
+- **Sang-tjeneste** (GPT-4o lyrics → Azure TTS → pyworld vocoder)
 - Real-time MQTT communication with AI assistants
 - Norwegian language support for object names
 
@@ -18,25 +20,32 @@ Duck-Vision/
 │   ├── duck_vision.py           # Main orchestrator
 │   ├── imx500_object_detection.py
 │   ├── imx500_face_recognition.py
+│   ├── speaker_recognition.py   # Stemmegjenkjenning (VAD + Resemblyzer)
 │   ├── mqtt_client.py
 │   ├── config.py
-│   └── duck_vision_integration.py
-├── docs/                         # Documentation
-│   ├── README.md                # Detailed documentation
-│   ├── INTEGRATION_GUIDE.md     # Pi 4 integration guide
-│   ├── ARKITEKTUR_ANBEFALINGER.md
-│   ├── IMX500_OPTIMIZATION.md
-│   ├── INSTALLATION_STATUS.md
-│   └── RESULTS.md
+│   ├── duck_vision_integration.py
+│   └── singing/                 # Sang-tjeneste
+│       ├── song_service.py      # MQTT sang-pipeline
+│       ├── song_generator.py    # GPT-4o lyrics + melodi
+│       ├── tts_provider.py      # Azure Neural TTS
+│       ├── singify.py           # pyworld vocoder
+│       ├── instrumental.py      # Akkompagnement
+│       └── midi_builder.py      # MIDI-generering
+├── scripts/                      # Verktøy-skript
+│   ├── register_face.py         # Registrer ansikt (interaktivt)
+│   ├── register_voice.py        # Registrer stemme (interaktivt)
+│   └── test_recognition.py      # Test ansikt + stemme
 ├── demos/                        # Demo & test scripts
 │   ├── demo_imx500.py           # Live object detection
-│   ├── demo_face_detection.py   # Person detection
-│   └── test_*.py                # Test scripts
+│   └── demo_face_detection.py   # Person detection
 ├── data/                         # Data storage
-│   ├── known_faces/             # Face encodings
+│   ├── known_faces/             # Ansiktsbilder + encodings
+│   ├── known_voices/            # Stemmeprofiler (.pkl)
 │   └── logs/                    # Application logs
-├── .env                         # Configuration
-├── requirements.txt             # Python dependencies
+├── docs/                         # Documentation
+├── setup.sh                     # Full automatisk installasjon
+├── .env                         # API-nøkler og konfigurasjon
+├── requirements.txt             # Alle Python-avhengigheter
 ├── duck-vision.service          # Systemd service file
 ├── install_service.sh           # Service installer
 └── start_duck_vision.sh         # Manual start script
@@ -48,45 +57,51 @@ Duck-Vision/
 - Raspberry Pi 5 (8GB recommended)
 - Raspberry Pi AI Camera (Sony IMX500)
 - Raspberry Pi OS Bookworm (64-bit)
+- USB-mikrofon (for stemmegjenkjenning)
 
 ### Installation
 
 1. **Clone repository:**
 ```bash
 cd ~/Code
-git clone <repository-url> Duck-Vision
-cd Duck-Vision
+git clone https://github.com/Osmund/Duck-vision.git
+cd Duck-vision
 ```
 
-2. **Install IMX500 software stack:**
+2. **Kjør setup (installerer alt automatisk):**
 ```bash
-sudo apt update
-sudo apt install -y imx500-all python3-picamera2
+./setup.sh
 ```
 
-3. **Install Python dependencies:**
+3. **Konfigurer API-nøkler:**
 ```bash
-python3 -m venv .venv
+nano .env
+# Legg inn:
+#   OPENAI_API_KEY=sk-...
+#   AZURE_TTS_KEY=...
+#   AZURE_TTS_REGION=westeurope
+#   MQTT_BROKER=oduckberry-2.local
+```
+
+4. **Registrer ansikt og stemme:**
+```bash
 source .venv/bin/activate
-pip install -r requirements.txt
+python3 scripts/register_face.py "Navn"
+python3 scripts/register_voice.py "Navn"
 ```
 
-Or for system Python:
+5. **Start tjenesten:**
 ```bash
-sudo apt-get install -y python3-pip
-python3 -m pip install --user --break-system-packages face_recognition python-dotenv paho-mqtt
+sudo systemctl start duck-vision
 ```
 
-4. **Configure:**
-```bash
-cp .env.example .env
-nano .env  # Edit MQTT broker settings
-```
+### Manuell installasjon (hvis setup.sh ikke brukes)
 
-5. **Test installation:**
-```bash
-python3 demos/demo_imx500.py
-```
+Se kommentarene i `requirements.txt` for system-pakker som må installeres først.
+Viktige poeng:
+- `picamera2` og `libcamera` **må** installeres via `apt` (ikke pip)
+- venv **må** bruke `--system-site-packages` for tilgang til libcamera
+- `dlib` bygges fra kilde på ARM — versjon ≥19.24 fungerer
 
 ## 🔧 Running as a Service
 
@@ -146,17 +161,22 @@ See [INTEGRATION_GUIDE.md](docs/INTEGRATION_GUIDE.md) for complete integration i
 ## 🧪 Testing
 
 ```bash
-# Test IMX500 basic functionality
-python3 demos/test_imx500_simple.py
+source .venv/bin/activate
 
-# Live object detection demo
+# Test ansikt + stemmegjenkjenning (interaktiv)
+python3 scripts/test_recognition.py
+
+# Registrer nytt ansikt (5 bilder, ENTER mellom hver)
+python3 scripts/register_face.py "Navn"
+
+# Registrer ny stemme (3 tekster, ENTER mellom hver)
+python3 scripts/register_voice.py "Navn"
+
+# IMX500 object detection demo
 python3 demos/demo_imx500.py
 
 # Person detection demo
 python3 demos/demo_face_detection.py
-
-# Test face recognition
-python3 demos/test_face_recognition.py
 ```
 
 ## 🛠️ Development
@@ -206,5 +226,7 @@ See [INTEGRATION_GUIDE.md](docs/INTEGRATION_GUIDE.md) for step-by-step instructi
 ---
 
 **Status:** Production Ready ✅  
-**Last Updated:** January 31, 2026  
-**Hardware:** Raspberry Pi 5 + Sony IMX500 AI Camera
+**Last Updated:** February 17, 2026  
+**Hardware:** Raspberry Pi 5 + Sony IMX500 AI Camera + USB-mikrofon  
+**OS:** Raspberry Pi OS Bookworm 64-bit (Debian 12)  
+**Python:** 3.11
