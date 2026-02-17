@@ -594,6 +594,10 @@ class DuckVision:
             logging.info(f"🔊 Stemme gjenkjent: {name} ({confidence:.2%}, {source})")
             self.mqtt.send_speaker_recognized(name, confidence, duration)
         
+        elif event_type == "noise_level":
+            db_rms = data.get("db_rms", -100)
+            self.mqtt.send_noise_level(db_rms)
+        
         elif event_type == "voice_profile_created":
             name = data.get("name")
             success = data.get("success", False)

@@ -175,6 +175,20 @@ class DuckMQTT:
         }
         self._publish(TOPICS["voice_profile_created"], message)
     
+    def send_noise_level(self, db_rms: float):
+        """Send ambient noise level to Samantha (for noise gating)"""
+        message = {
+            "event": "noise_level",
+            "timestamp": time.time(),
+            "db_rms": round(db_rms, 1),
+        }
+        # Use QoS 0 for noise level (high frequency, loss is OK)
+        try:
+            payload = json.dumps(message, ensure_ascii=False)
+            self.client.publish(TOPICS["noise_level"], payload, qos=0)
+        except Exception:
+            pass  # Non-critical, don't spam logs
+
     def send_event(self, event_type: str, data: Dict[str, Any]):
         """Send generisk event til Samantha"""
         message = {

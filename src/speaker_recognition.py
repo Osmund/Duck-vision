@@ -659,6 +659,16 @@ class SpeakerRecognition:
                 # Flatten til 1D
                 audio = audio.flatten()
                 
+                # Beregn ambient noise level (RMS i dB) og publiser annethvert chunk
+                if not hasattr(self, '_noise_chunk_counter'):
+                    self._noise_chunk_counter = 0
+                self._noise_chunk_counter += 1
+                if self._noise_chunk_counter % 2 == 0:  # Annethvert chunk (~6s)
+                    rms = float(np.sqrt(np.mean(audio ** 2)))
+                    db_rms = 20 * np.log10(max(rms, 1e-10))
+                    if self.event_callback:
+                        self.event_callback('noise_level', {'db_rms': round(db_rms, 1)})
+                
                 # Resample til 16kHz for VAD og embedding
                 audio_16k = self._resample(audio, mic_sr, target_sr)
                 

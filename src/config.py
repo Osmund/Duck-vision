@@ -99,6 +99,7 @@ TOPICS.update({
     "voice_profile_created": os.getenv("MQTT_TOPIC_VOICE_LEARNED", "duck/audio/voice_learned"),
     "samantha_speaking": os.getenv("MQTT_TOPIC_SAMANTHA_SPEAKING", "duck/samantha/speaking"),
     "samantha_conversation": os.getenv("MQTT_TOPIC_SAMANTHA_CONVERSATION", "duck/samantha/conversation"),
+    "noise_level": os.getenv("MQTT_TOPIC_NOISE_LEVEL", "duck/audio/noise_level"),
 })
 
 print(f"  - MQTT Broker: {MQTT_CONFIG['broker']}:{MQTT_CONFIG['port']}")
