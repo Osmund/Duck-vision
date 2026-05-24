@@ -142,7 +142,8 @@ class DuckMQTT:
         }
         self._publish(TOPICS["face_detected"], message)
     
-    def send_object_detected(self, object_name: str, confidence: float, all_objects: list = None):
+    def send_object_detected(self, object_name: str, confidence: float, all_objects: list = None,
+                             detailed_description: str = None, openai_tokens: dict = None):
         """Send melding om objektdeteksjon til Samantha"""
         message = {
             "event": "object_detected",
@@ -151,6 +152,12 @@ class DuckMQTT:
             "confidence": confidence,
             "all_objects": all_objects or []  # Liste med alle objekter
         }
+
+        if detailed_description:
+            message["detailed_description"] = detailed_description
+        if openai_tokens:
+            message["openai_tokens"] = openai_tokens
+
         self._publish(TOPICS["object_detected"], message)
     
     def send_speaker_recognized(self, name: str, confidence: float, speech_duration: float = 0.0):

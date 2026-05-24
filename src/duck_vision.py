@@ -9,10 +9,12 @@ import time
 import signal
 import sys
 import os
+import re
 from pathlib import Path
 from enum import Enum
 from typing import Optional
 import logging
+from PIL import Image
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -22,7 +24,12 @@ from imx500_object_detection import IMX500ObjectDetector
 from openai_vision import OpenAIVision
 from speaker_recognition import SpeakerRecognition
 from mqtt_client import DuckMQTT
-from config import FACE_CONFIG, VOICE_CONFIG, TOPICS
+from config import FACE_CONFIG, VOICE_CONFIG, TOPICS, OBJECT_CONFIG
+
+try:
+    from hailo_object_detection import HailoObjectDetector
+except Exception:
+    HailoObjectDetector = None
 
 # Setup logging
 logging.basicConfig(
@@ -47,12 +54,14 @@ class DuckVision:
     def __init__(self):
         self.running = False
         self.mode = VisionMode.FACE_DETECTION
+        self.object_backend = OBJECT_CONFIG.get("backend", "imx500")
         
         # IMX500-optimaliserte komponenter
         # Face recognizer først (starter kamera)
         self.face_recognizer = IMX500FaceRecognizer(progress_callback=self._on_learning_progress)
-        # Object detector deler kamera-instans
-        self.object_detector = None  # Initialiseres etter at kamera starter
+        # Object detectors
+        self.object_detector = None  # IMX500 detector
+        self.hailo_detector = None   # Hailo detector (on-demand)
         # OpenAI Vision for dyp forståelse
         self.openai_vision = None  # Initialiseres ved første bruk
         # Speaker recognition (passiv lytting)
@@ -65,8 +74,22 @@ class DuckVision:
         self.pending_num_samples = 5  # Antall bilder å ta ved læring (default: 5)
         self.last_seen_faces = set()  # Cache av nylig sette ansikter
         self.last_unknown_alert = 0  # Timestamp for siste ukjent-person alert
+
+        # Live preview for web dashboard
+        self.live_preview_enabled = os.getenv("VISION_WEB_PREVIEW_ENABLED", "true").lower() == "true"
+        self.live_preview_interval = max(0.2, float(os.getenv("VISION_WEB_PREVIEW_INTERVAL", "0.7")))
+        self.live_preview_max_width = max(320, int(os.getenv("VISION_WEB_PREVIEW_MAX_WIDTH", "960")))
+        self.live_preview_color_order = os.getenv("VISION_WEB_PREVIEW_COLOR_ORDER", "bgr").lower()
+        default_live_path = Path(__file__).resolve().parents[1] / "data" / "logs" / "duck_vision_live.jpg"
+        self.live_preview_path = Path(os.getenv("VISION_WEB_PREVIEW_PATH", str(default_live_path)))
+        self._last_live_preview = 0.0
+        self._last_live_preview_error_log = 0.0
+        self.openai_identity_first = False
+        self.last_speaker_name = None
+        self.last_speaker_confidence = 0.0
+        self.last_speaker_ts = 0.0
         
-        logging.info("✓ DuckVision initialisert med IMX500-støtte")
+        logging.info("✓ DuckVision initialisert (object backend: %s)", self.object_backend)
     
     def setup(self) -> bool:
         """Initialiser alle komponenter"""
@@ -102,9 +125,24 @@ class DuckVision:
             # Start face recognizer først (starter kamera)
             self.face_recognizer.start()
             
-            # Object detector bruker samme kamera, men med sin egen IMX500 instans
-            # Vi lager den først når vi trenger den (lazy init)
-            self.object_detector = IMX500ObjectDetector()
+            # IMX500 object detector (for imx500/hybrid)
+            if self.object_backend in ("imx500", "hybrid"):
+                self.object_detector = IMX500ObjectDetector(
+                    model_path=OBJECT_CONFIG["imx500_model"],
+                    confidence_threshold=OBJECT_CONFIG["confidence_threshold"],
+                )
+
+            # Hailo object detector (for hailo/hybrid)
+            if self.object_backend in ("hailo", "hybrid"):
+                if HailoObjectDetector is None:
+                    raise RuntimeError("HailoObjectDetector kunne ikke importeres")
+                self.hailo_detector = HailoObjectDetector(
+                    confidence_threshold=OBJECT_CONFIG.get("hailo_threshold", 0.35),
+                    duration_ms=OBJECT_CONFIG.get("hailo_duration_ms", 1800),
+                    width=OBJECT_CONFIG.get("hailo_width", 1280),
+                    height=OBJECT_CONFIG.get("hailo_height", 720),
+                    fps=OBJECT_CONFIG.get("hailo_fps", 15),
+                )
             
             print("✓ IMX500 kamera startet - AI kjører på chip!")
         except Exception as e:
@@ -126,6 +164,7 @@ class DuckVision:
         
         print(f"\n✓ Alle komponenter initialisert!")
         print(f"✓ Kjente personer: {len(self.face_recognizer.list_known_people())}")
+        print(f"✓ Object backend: {self.object_backend}")
         print(f"✓ Latency: ~5-10ms (AI på chip!) 🚀")
         return True
     
@@ -161,6 +200,15 @@ class DuckVision:
                     self._analyze_with_openai()
                     # Gå tilbake til face detection
                     self.mode = VisionMode.FACE_DETECTION
+
+                # Eksporter lavoppløselig live frame for web-dashboard.
+                if (
+                    self.live_preview_enabled
+                    and self.mode == VisionMode.FACE_DETECTION
+                    and (current_time - self._last_live_preview) >= self.live_preview_interval
+                ):
+                    self._write_live_preview_frame()
+                    self._last_live_preview = current_time
                 
                 # Små pauser for å ikke overbelaste CPU
                 time.sleep(0.1)
@@ -218,24 +266,69 @@ class DuckVision:
             
         except Exception as e:
             logging.error(f"❌ Feil ved ansiktsdeteksjon: {e}")
+
+    def _write_live_preview_frame(self):
+        """Lagre et komprimert live-bilde for web-UI."""
+        picam = getattr(self.face_recognizer, "picam2", None)
+        if not picam:
+            return
+
+        try:
+            self.live_preview_path.parent.mkdir(parents=True, exist_ok=True)
+            frame = picam.capture_array()
+
+            # Picamera2 frames can arrive in BGR order for preview paths.
+            if self.live_preview_color_order == "bgr" and len(frame.shape) == 3 and frame.shape[2] >= 3:
+                frame = frame[:, :, ::-1]
+
+            image = Image.fromarray(frame)
+            width, height = image.size
+            if width > self.live_preview_max_width:
+                new_height = int(height * self.live_preview_max_width / width)
+                image = image.resize((self.live_preview_max_width, new_height))
+
+            tmp_path = self.live_preview_path.with_name(self.live_preview_path.stem + ".tmp.jpg")
+            image.save(tmp_path, format="JPEG", quality=72, optimize=True)
+            os.replace(tmp_path, self.live_preview_path)
+        except Exception as e:
+            now_ts = time.time()
+            if now_ts - self._last_live_preview_error_log > 30:
+                logging.warning(f"Kunne ikke skrive live preview frame: {e}")
+                self._last_live_preview_error_log = now_ts
     
     def _check_objects(self):
-        """Sjekk for objekter - KJØRER PÅ IMX500 CHIP! ⚡"""
+        """Sjekk for objekter via valgt backend (imx500/hailo/hybrid)."""
         try:
-            # Start object detector hvis ikke allerede startet
-            if not hasattr(self.object_detector, 'picam2') or not self.object_detector.picam2:
-                logging.info("⚙️ Starter object detector...")
-                # Stopp face recognizer midlertidig
-                self.face_recognizer.stop()
-                time.sleep(0.5)  # Vent litt før vi starter ny kamera-instans
-                # Start object detector
+            # Stopp face recognizer midlertidig for å frigjøre kamera
+            self.face_recognizer.stop()
+            time.sleep(0.5)
+
+            detections_imx500 = []
+            detections_hailo = []
+
+            if self.object_backend in ("imx500", "hybrid") and self.object_detector:
+                logging.info("🔍 Ser etter objekter på IMX500...")
                 self.object_detector.start()
-                time.sleep(1)  # Vent på at IMX500 laster firmware
-            
-            logging.info("🔍 Ser etter objekter på IMX500...")
-            
-            # Detekter ALLE objekter (direkte på IMX500 chip!)
-            all_objects = self.object_detector.detect_objects()
+                time.sleep(1)  # Vent på modell-warmup
+                detections_imx500 = self.object_detector.detect_objects()
+
+                # Frigi kamera før Hailo-pass i hybrid-modus.
+                if self.object_backend == "hybrid":
+                    self.object_detector.stop()
+                    time.sleep(0.4)
+
+            if self.object_backend in ("hailo", "hybrid") and self.hailo_detector:
+                logging.info("🧠 Ser etter objekter på Hailo...")
+                detections_hailo = self.hailo_detector.detect_objects()
+
+            # Merge ved navn, behold hoyeste confidence per objekt
+            merged = {}
+            for name, confidence, bbox in detections_imx500 + detections_hailo:
+                existing = merged.get(name)
+                if not existing or confidence > existing[0]:
+                    merged[name] = (confidence, bbox)
+
+            all_objects = [(name, conf, bbox) for name, (conf, bbox) in merged.items()]
             
             if not all_objects:
                 logging.info("  Ingen objekter funnet")
@@ -251,6 +344,29 @@ class DuckVision:
                         "bbox": [float(x) for x in bbox]  # Konverter bbox til Python floats
                     })
                     logging.info(f"    • {obj_name}: {confidence:.2%}")
+
+                detailed_description = None
+                openai_tokens = {}
+
+                if OBJECT_CONFIG.get("enrich_with_openai", True):
+                    context_objects = [o["name"] for o in objects_list]
+                    question = (
+                        "Beskriv scenen detaljert på norsk. "
+                        f"Objekter detektert lokalt: {', '.join(context_objects)}. "
+                        "Forklar hva som skjer, plassering i rommet, relasjoner mellom objekter, "
+                        "belysning og relevante detaljer som hjelper en blind bruker."
+                    )
+                    logging.info("🤖 Ber OpenAI om detaljbeskrivelse av scenen...")
+                    result = self._capture_scene_with_openai(
+                        question=question,
+                        max_tokens=OBJECT_CONFIG.get("openai_max_tokens", 900)
+                    )
+                    if result.get("success"):
+                        detailed_description = result.get("description")
+                        openai_tokens = result.get("tokens_used", {})
+                        logging.info("✓ OpenAI detaljbeskrivelse mottatt")
+                    else:
+                        logging.warning("⚠️ OpenAI enrichment feilet: %s", result.get("error", "ukjent"))
                 
                 # Finn mest prominente objekt
                 most_prominent = max(all_objects, key=lambda x: x[1])
@@ -258,7 +374,22 @@ class DuckVision:
                 
                 # Send til Samantha (med hovedobjekt + alle objekter)
                 logging.info(f"📦 Sender {len(objects_list)} objekt(er) til Samantha")
-                self.mqtt.send_object_detected(obj_name, float(confidence), objects_list)
+                self.mqtt.send_object_detected(
+                    obj_name,
+                    float(confidence),
+                    objects_list,
+                    detailed_description=detailed_description,
+                    openai_tokens=openai_tokens,
+                )
+
+                # Behold eksisterende event-kanal for kompatibilitet.
+                if detailed_description:
+                    self.mqtt.send_event("openai_analysis", {
+                        "description": detailed_description,
+                        "question": question,
+                        "tokens_used": openai_tokens,
+                        "source": "detect_object_enrichment",
+                    })
             
         except Exception as e:
             logging.error(f"❌ Feil ved objektdeteksjon: {e}")
@@ -267,7 +398,7 @@ class DuckVision:
         finally:
             # Alltid gå tilbake til face detection
             logging.info("⚙️ Bytter tilbake til face detection...")
-            if hasattr(self.object_detector, 'picam2') and self.object_detector.picam2:
+            if self.object_detector and hasattr(self.object_detector, 'picam2') and self.object_detector.picam2:
                 self.object_detector.stop()
                 time.sleep(0.5)
             self.face_recognizer.start()
@@ -276,60 +407,61 @@ class DuckVision:
     def _analyze_with_openai(self):
         """Analyser scene med OpenAI Vision API"""
         try:
-            # Initialiser OpenAI Vision ved første bruk
-            if not self.openai_vision:
-                from openai_vision import OpenAIVision
-                self.openai_vision = OpenAIVision()
-            
             logging.info("🤖 Tar bilde for OpenAI Vision analyse...")
-            
+
+            question = getattr(self, 'openai_question', None)
+            identity_result = None
+
+            if self.openai_identity_first:
+                logging.info("🪪 Identitetsfokus oppdaget - kjører check_person før sceneanalyse")
+                identity_result = self._run_check_person(publish_event=True)
+
+                if identity_result.get("found"):
+                    name = identity_result.get("name", "ukjent")
+                    confidence = float(identity_result.get("confidence", 0.0))
+                    confidence_pct = round(confidence * 100)
+                    confidence_note = "lav sikkerhet" if identity_result.get("low_confidence") else "høy sikkerhet"
+                    identity_hint = (
+                        f"Lokal ansiktsgjenkjenning: sannsynligvis {name} "
+                        f"({confidence_pct}% confidence, {confidence_note})."
+                    )
+                else:
+                    identity_hint = "Lokal ansiktsgjenkjenning fant ikke sikker identitet."
+
+                if question:
+                    question = f"{question}\n\n{identity_hint}"
+                else:
+                    question = identity_hint
+
             # Ta et høykvalitets bilde fra normal kamera (ikke IMX500 mode)
-            # Stopp face recognizer midlertidig
             self.face_recognizer.stop()
             time.sleep(0.5)
-            
-            # Bruk rpicam-still for bedre bildekvalitet (bedre ISP enn Picamera2/IMX500)
-            import subprocess
-            import tempfile
-            from PIL import Image
-            
-            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                tmp_path = tmp.name
-            
-            # Ta bilde med rpicam-still (optimalisert for hastighet)
-            cmd = [
-                "rpicam-still",
-                "-o", tmp_path,
-                "--width", "512",
-                "--height", "384",
-                "-t", "500",  # 500ms - raskere, fortsatt god kvalitet
-                "--awb", "auto",
-                "-n"  # No preview
-            ]
-            
-            logging.info("📸 Tar bilde med rpicam-still...")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            
-            if result.returncode != 0:
-                raise Exception(f"rpicam-still feilet: {result.stderr}")
-            
-            # Last inn bildet
-            image = Image.open(tmp_path)
-            os.unlink(tmp_path)  # Slett temp-fil
-            
-            logging.info("📸 Bilde tatt, sender til OpenAI Vision...")
-            
-            # Analyser med OpenAI Vision
-            question = getattr(self, 'openai_question', None)
-            result = self.openai_vision.analyze_image(
-                pil_image=image,
-                question=question,
-                max_tokens=200  # Redusert for hastighet
-            )
+            result = self._capture_scene_with_openai(question=question, max_tokens=800)
             
             if result["success"]:
                 description = result["description"]
                 tokens = result.get("tokens_used", {})
+
+                if identity_result:
+                    if identity_result.get("found"):
+                        cleaned = self._strip_identity_fallback_text(description)
+                        if cleaned != description:
+                            logging.info("🧹 Fjernet selvmotsigende identitets-fraser fra OpenAI-tekst")
+                        description = cleaned or ""
+
+                    if identity_result.get("found"):
+                        name = identity_result.get("name", "ukjent")
+                        confidence = float(identity_result.get("confidence", 0.0))
+                        confidence_pct = round(confidence * 100)
+                        if identity_result.get("low_confidence"):
+                            identity_prefix = f"Jeg tror det kan være {name} ({confidence_pct}% sikkerhet), men dette er usikkert."
+                        else:
+                            identity_prefix = f"Det ser ut til å være {name} ({confidence_pct}% sikkerhet)."
+                    else:
+                        identity_prefix = "Jeg klarte ikke å bekrefte identiteten sikkert."
+
+                    description = f"{identity_prefix}\n\n{description}" if description else identity_prefix
+
                 logging.info(f"✓ OpenAI Vision: {description[:100]}...")
                 logging.info(f"  Tokens: {tokens.get('total_tokens', 'N/A')}")
                 
@@ -337,8 +469,17 @@ class DuckVision:
                 self.mqtt.send_event("openai_analysis", {
                     "description": description,
                     "question": question,
-                    "tokens_used": tokens
+                    "tokens_used": tokens,
+                    "identity_result": identity_result,
                 })
+
+                if identity_result:
+                    self.mqtt.send_event("scene_identity_result", {
+                        "question": question,
+                        "identity_result": identity_result,
+                        "description": description,
+                        "tokens_used": tokens,
+                    })
             else:
                 error = result.get("error", "Ukjent feil")
                 logging.error(f"❌ OpenAI Vision feilet: {error}")
@@ -351,9 +492,320 @@ class DuckVision:
             # Restart face recognizer
             logging.info("⚙️ Starter face detection igjen...")
             self.openai_question = None  # Reset spørsmål
+            self.openai_identity_first = False
             self.face_recognizer.start()
             time.sleep(1)
-    
+
+    def _is_identity_question(self, question: Optional[str]) -> bool:
+        """Vurder om spørsmålet egentlig handler om identitet/person."""
+        if not question:
+            return False
+
+        ql = question.lower()
+        cues = [
+            "hvem er",
+            "hvem ser du",
+            "hvem sitter",
+            "er det meg",
+            "er dette meg",
+            "er det osmund",
+            "er det åsmund",
+            "kjenner du meg",
+            "who is",
+            "am i",
+        ]
+        return any(c in ql for c in cues)
+
+    def _strip_identity_fallback_text(self, text: str) -> str:
+        """Fjern selvmotsigende fallback-setninger, men behold scenedetaljer."""
+        if not text:
+            return text
+
+        blocked_phrases = [
+            "jeg kan ikke identifisere personer på bilder",
+            "kan ikke identifisere personer på bilder",
+            "jeg kan ikke se identiteten",
+            "kan ikke se identiteten",
+            "beklager, jeg kan ikke identifisere personer",
+            "beklager, men jeg kan ikke identifisere personer",
+        ]
+
+        segments = re.split(r"(?<=[.!?])\s+|\n+", text.strip())
+        kept = []
+        for seg in segments:
+            candidate = seg.strip()
+            if not candidate:
+                continue
+            lower = candidate.lower()
+            if any(phrase in lower for phrase in blocked_phrases):
+                continue
+            kept.append(candidate)
+
+        return " ".join(kept).strip()
+
+    def _run_check_person(self, publish_event: bool = True, min_confidence: float = 0.50, max_attempts: int = 3) -> dict:
+        """Kjør check_person med flere forsøk, og returner strukturert resultat."""
+        logging.info("👀 Sjekk hvem som er tilstede (prøver opptil %d ganger)...", max_attempts)
+
+        best_result = None
+        best_confidence = 0.0
+
+        for attempt in range(1, max_attempts + 1):
+            faces = self.face_recognizer.detect_faces()
+
+            if faces and len(faces) > 0:
+                name, confidence, _location = faces[0]
+
+                if confidence > best_confidence:
+                    best_result = (name, confidence)
+                    best_confidence = confidence
+
+                recent_voice_match = self._recent_speaker_match(name)
+                required_confidence = max(0.0, min_confidence - (0.08 if recent_voice_match else 0.0))
+
+                if confidence >= required_confidence and name != "ukjent":
+                    logging.info("✅ Forsøk %d/%d: Gjenkjent %s (%.2f%%)", attempt, max_attempts, name, confidence * 100)
+
+                    has_voice = False
+                    if self.speaker_recognition:
+                        has_voice = self.speaker_recognition.has_voice_profile(name)
+                        if not has_voice and self.speaker_recognition.config.get("auto_enroll"):
+                            self.speaker_recognition.start_auto_enroll(name)
+
+                    payload = {
+                        "found": True,
+                        "name": name,
+                        "confidence": confidence,
+                        "has_voice_profile": has_voice,
+                        "voice_assisted": recent_voice_match,
+                        "match_threshold_used": required_confidence,
+                        "low_confidence": False,
+                    }
+                    if publish_event:
+                        self.mqtt.send_event("check_person_result", payload)
+                    return payload
+
+                logging.info("⚠️ Forsøk %d/%d: %s (%.2f%%) - for lav confidence", attempt, max_attempts, name, confidence * 100)
+            else:
+                logging.info("⚠️ Forsøk %d/%d: Ingen ansikt detektert", attempt, max_attempts)
+
+            if attempt < max_attempts:
+                time.sleep(0.3)
+
+        if best_result and best_result[0] != "ukjent":
+            recent_voice_match = self._recent_speaker_match(best_result[0])
+            if recent_voice_match and best_confidence >= max(0.0, min_confidence - 0.12):
+                payload = {
+                    "found": True,
+                    "name": best_result[0],
+                    "confidence": best_confidence,
+                    "voice_assisted": True,
+                    "match_threshold_used": max(0.0, min_confidence - 0.12),
+                    "low_confidence": True,
+                }
+                logging.info(
+                    "✅ Stemmehjelp: godtar %s (%.2f%%) etter %d forsøk",
+                    best_result[0],
+                    best_confidence * 100,
+                    max_attempts,
+                )
+                if publish_event:
+                    self.mqtt.send_event("check_person_result", payload)
+                return payload
+
+            payload = {
+                "found": True,
+                "name": best_result[0],
+                "confidence": best_confidence,
+                "voice_assisted": False,
+                "low_confidence": True,
+            }
+            logging.info(
+                "⚠️ Beste resultat etter %d forsøk: %s (%.2f%%) - under terskel",
+                max_attempts,
+                best_result[0],
+                best_confidence * 100,
+            )
+            if publish_event:
+                self.mqtt.send_event("check_person_result", payload)
+            return payload
+
+        payload = {
+            "found": False,
+            "reason": "no_person_detected",
+            "low_confidence": True,
+        }
+        logging.info("❌ Ingen person gjenkjent etter %d forsøk", max_attempts)
+        if publish_event:
+            self.mqtt.send_event("check_person_result", payload)
+        return payload
+
+    def _recent_speaker_match(self, name: str, max_age_sec: float = 20.0, min_voice_confidence: float = 0.70) -> bool:
+        """Sjekk om vi nylig hørte samme person på stemmen."""
+        if not name or name == "ukjent":
+            return False
+
+        if not self.last_speaker_name:
+            return False
+
+        age = time.time() - float(self.last_speaker_ts or 0.0)
+        if age > max_age_sec:
+            return False
+
+        return (
+            self.last_speaker_name.lower() == name.lower()
+            and float(self.last_speaker_confidence or 0.0) >= min_voice_confidence
+        )
+
+    def _capture_scene_with_openai(self, question: str = None, max_tokens: int = 800) -> dict:
+        """Ta stillbilde og analyser med OpenAI Vision. Forutsetter at kamera er frigitt."""
+        try:
+            if not self.openai_vision:
+                self.openai_vision = OpenAIVision()
+
+            import subprocess
+            import tempfile
+            from PIL import Image
+
+            def is_hand_question(q: str) -> bool:
+                if not q:
+                    return False
+                ql = q.lower()
+                keywords = ["holder", "hånden", "hånda", "hender", "hand", "tang", "grep", "griper"]
+                return any(k in ql for k in keywords)
+
+            def score_answer(ans: str) -> int:
+                if not ans:
+                    return -10_000
+                ql = ans.lower()
+                uncertain_phrases = [
+                    "kan ikke si sikkert",
+                    "ikke sikker",
+                    "usikker",
+                    "ikke tydelig",
+                    "vanskelig å se",
+                ]
+                penalty = 0
+                if any(p in ql for p in uncertain_phrases):
+                    penalty -= 2000
+                return min(len(ans), 2000) + penalty
+
+            def is_non_visual_fallback(ans: str) -> bool:
+                if not ans:
+                    return True
+                ql = ans.lower()
+                bad_phrases = [
+                    "jeg kan ikke se bilder",
+                    "kan ikke se bilder",
+                    "jeg kan ikke identifisere personer",
+                    "jeg kan ikke se identiteten",
+                    "basert på beskrivelsen",
+                    "du nevner",
+                ]
+                return any(p in ql for p in bad_phrases)
+
+            hand_mode = is_hand_question(question)
+            max_shots = OBJECT_CONFIG.get("openai_hand_multishot", 3) if hand_mode else OBJECT_CONFIG.get("openai_default_multishot", 1)
+            max_shots = max(1, min(int(max_shots), 4))
+            adaptive = OBJECT_CONFIG.get("openai_adaptive_multishot", True)
+            min_shots = max(1, min(int(OBJECT_CONFIG.get("openai_min_shots", 1)), max_shots))
+            shots = min_shots if adaptive else max_shots
+
+            detail = OBJECT_CONFIG.get("openai_detail_hand", "high") if hand_mode else OBJECT_CONFIG.get("openai_detail", "auto")
+            detail = detail if detail in ("auto", "low", "high") else "auto"
+
+            prompt = question
+            if hand_mode and question:
+                prompt = (
+                    f"{question}\\n"
+                    "Fokuser spesielt på hva personen holder i hendene. "
+                    "Hvis du er usikker, gi 1-2 mest sannsynlige alternativer og hvorfor."
+                )
+
+            best = None
+            last_error = None
+
+            def run_single_shot(idx: int, total: int):
+                nonlocal last_error
+                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                    tmp_path = tmp.name
+
+                cmd = [
+                    "rpicam-still",
+                    "-o", tmp_path,
+                    "--width", "1920",
+                    "--height", "1080",
+                    "-t", "800",
+                    "--awb", "auto",
+                    "-n",
+                ]
+
+                logging.info("📸 Tar bilde med rpicam-still... (%d/%d)", idx, total)
+                shot = subprocess.run(cmd, capture_output=True, text=True)
+                if shot.returncode != 0:
+                    last_error = f"rpicam-still feilet: {shot.stderr.strip()}"
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+                    return None
+
+                image = Image.open(tmp_path)
+                os.unlink(tmp_path)
+
+                logging.info("📸 Bilde tatt, sender til OpenAI Vision... (%d/%d, detail=%s)", idx, total, detail)
+                result = self.openai_vision.analyze_image(
+                    pil_image=image,
+                    question=prompt,
+                    max_tokens=max_tokens,
+                    detail=detail,
+                )
+
+                if not result.get("success"):
+                    last_error = result.get("error", "ukjent feil")
+                    return None
+
+                ans = result.get("description", "")
+                candidate_score = score_answer(ans)
+                if is_non_visual_fallback(ans):
+                    candidate_score -= 3000
+                return candidate_score, result
+
+            for i in range(shots):
+                candidate = run_single_shot(i + 1, shots)
+                if not candidate:
+                    continue
+                if not best or candidate[0] > best[0]:
+                    best = candidate
+
+            if adaptive and best and max_shots > shots:
+                best_text = best[1].get("description", "")
+                if is_non_visual_fallback(best_text) or score_answer(best_text) < 300:
+                    extra = max_shots - shots
+                    logging.info("⚡ Adaptiv multishot: utvider fra %d til %d snapshots pga lav kvalitet", shots, max_shots)
+                    for i in range(extra):
+                        idx = shots + i + 1
+                        candidate = run_single_shot(idx, max_shots)
+                        if not candidate:
+                            continue
+                        if candidate[0] > best[0]:
+                            best = candidate
+                    shots = max_shots
+
+            if best:
+                if shots > 1:
+                    logging.info("✓ Valgte beste OpenAI-svar fra %d snapshots", shots)
+                return best[1]
+
+            return {
+                "success": False,
+                "error": last_error or "Ingen gyldige OpenAI-svar",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+            }
     def _on_learning_progress(self, progress: dict):
         """Callback når face learning tar bilde - send til Samantha for TTS guidance"""
         step = progress.get("step", 0)
@@ -420,73 +872,26 @@ class DuckVision:
             # Analyser scene med OpenAI Vision
             question = message.get("question")
             self.openai_question = question
+            self.openai_identity_first = self._is_identity_question(question)
             self.mode = VisionMode.OPENAI_ANALYSIS
             if question:
-                logging.info(f"  → OpenAI Vision analyse: {question}")
+                if self.openai_identity_first:
+                    logging.info(f"  → OpenAI Vision analyse med identitetsfokus: {question}")
+                else:
+                    logging.info(f"  → OpenAI Vision analyse: {question}")
             else:
                 logging.info(f"  → OpenAI Vision generell analyse")
+
+        elif command == "inspect_scene":
+            # Kombinert flyt: identitet + scenebeskrivelse i én operasjon
+            question = message.get("question") or "Hvem er i bildet, og hva skjer i scenen akkurat nå?"
+            self.openai_question = question
+            self.openai_identity_first = True
+            self.mode = VisionMode.OPENAI_ANALYSIS
+            logging.info(f"  → Kombinert sceneinspeksjon: {question}")
         
         elif command == "check_person":
-            # Sjekk hvem som er der akkurat nå - prøv opptil 3 ganger
-            logging.info("👀 Sjekk hvem som er tilstede (prøver opptil 3 ganger)...")
-            
-            MIN_CONFIDENCE = 0.50  # 50% minimum confidence
-            MAX_ATTEMPTS = 3
-            best_result = None
-            best_confidence = 0.0
-            
-            for attempt in range(1, MAX_ATTEMPTS + 1):
-                faces = self.face_recognizer.detect_faces()
-                
-                if faces and len(faces) > 0:
-                    name, confidence, location = faces[0]
-                    
-                    # Oppdater beste resultat
-                    if confidence > best_confidence:
-                        best_result = (name, confidence, location)
-                        best_confidence = confidence
-                    
-                    # Hvis vi har høy nok confidence, bruk det umiddelbart
-                    if confidence >= MIN_CONFIDENCE and name != "ukjent":
-                        logging.info(f"✅ Forsøk {attempt}/{MAX_ATTEMPTS}: Gjenkjent {name} ({confidence:.2%})")
-                        
-                        # Sjekk om vi har stemmeprofil, start auto-enroll hvis ikke
-                        has_voice = False
-                        if self.speaker_recognition:
-                            has_voice = self.speaker_recognition.has_voice_profile(name)
-                            if not has_voice and self.speaker_recognition.config.get("auto_enroll"):
-                                self.speaker_recognition.start_auto_enroll(name)
-                        
-                        self.mqtt.send_event("check_person_result", {
-                            "found": True,
-                            "name": name,
-                            "confidence": confidence,
-                            "has_voice_profile": has_voice
-                        })
-                        break
-                    else:
-                        logging.info(f"⚠️ Forsøk {attempt}/{MAX_ATTEMPTS}: {name} ({confidence:.2%}) - for lav confidence")
-                else:
-                    logging.info(f"⚠️ Forsøk {attempt}/{MAX_ATTEMPTS}: Ingen ansikt detektert")
-                
-                # Vent litt før neste forsøk (unntatt siste)
-                if attempt < MAX_ATTEMPTS:
-                    time.sleep(0.3)
-            else:
-                # Alle forsøk feilet eller for lav confidence
-                if best_result and best_result[0] != "ukjent":
-                    logging.info(f"⚠️ Beste resultat etter {MAX_ATTEMPTS} forsøk: {best_result[0]} ({best_confidence:.2%}) - under terskel")
-                    self.mqtt.send_event("check_person_result", {
-                        "found": True,
-                        "name": best_result[0],
-                        "confidence": best_confidence
-                    })
-                else:
-                    logging.info("❌ Ingen person gjenkjent etter 3 forsøk")
-                    self.mqtt.send_event("check_person_result", {
-                        "found": False,
-                        "reason": "no_person_detected"
-                    })
+            self._run_check_person(publish_event=True)
 
         elif command == "learn_person":
             # Start læring av ny person med flere bilder for bedre nøyaktighet
@@ -591,6 +996,9 @@ class DuckVision:
             confidence = data.get("confidence", 0)
             duration = data.get("speech_duration", 0)
             source = data.get("source", "passive")
+            self.last_speaker_name = name
+            self.last_speaker_confidence = float(confidence or 0.0)
+            self.last_speaker_ts = time.time()
             logging.info(f"🔊 Stemme gjenkjent: {name} ({confidence:.2%}, {source})")
             self.mqtt.send_speaker_recognized(name, confidence, duration)
         
@@ -616,8 +1024,10 @@ class DuckVision:
         if self.speaker_recognition:
             self.speaker_recognition.stop()
         self.face_recognizer.stop()
-        if hasattr(self.object_detector, 'stop'):
+        if self.object_detector and hasattr(self.object_detector, 'stop'):
             self.object_detector.stop()
+        if self.hailo_detector and hasattr(self.hailo_detector, 'stop'):
+            self.hailo_detector.stop()
         self.mqtt.disconnect()
         
         logging.info("✓ Duck-Vision stoppet")

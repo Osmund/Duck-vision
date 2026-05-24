@@ -67,8 +67,24 @@ OBJECT_CONFIG = {
     "model_path": MODELS_DIR / "yolov8n.pt",
     "confidence_threshold": 0.35,  # 35% minimum - balanced threshold
     "iou_threshold": 0.45,
+    "backend": os.getenv("OBJECT_BACKEND", "imx500").lower(),  # imx500 | hailo | hybrid
     # IMX500: NanoDet Plus (416x416) - best balance of speed and accuracy
-    "imx500_model": "/usr/share/imx500-models/imx500_network_nanodet_plus_416x416_pp.rpk"
+    "imx500_model": "/usr/share/imx500-models/imx500_network_nanodet_plus_416x416_pp.rpk",
+    # Hailo (AI HAT+) runtime defaults
+    "hailo_threshold": float(os.getenv("HAILO_THRESHOLD", "0.35")),
+    "hailo_duration_ms": int(os.getenv("HAILO_DURATION_MS", "1800")),
+    "hailo_width": int(os.getenv("HAILO_WIDTH", "1280")),
+    "hailo_height": int(os.getenv("HAILO_HEIGHT", "720")),
+    "hailo_fps": int(os.getenv("HAILO_FPS", "15")),
+    # OpenAI enrichment etter objektdeteksjon
+    "enrich_with_openai": os.getenv("OBJECT_ENRICH_WITH_OPENAI", "true").lower() == "true",
+    "openai_max_tokens": int(os.getenv("OBJECT_OPENAI_MAX_TOKENS", "900")),
+    "openai_detail": os.getenv("OBJECT_OPENAI_DETAIL", "auto"),  # auto | low | high
+    "openai_detail_hand": os.getenv("OBJECT_OPENAI_DETAIL_HAND", "high"),
+    "openai_default_multishot": int(os.getenv("OBJECT_OPENAI_DEFAULT_MULTISHOT", "1")),
+    "openai_hand_multishot": int(os.getenv("OBJECT_OPENAI_HAND_MULTISHOT", "3")),
+    "openai_adaptive_multishot": os.getenv("OBJECT_OPENAI_ADAPTIVE_MULTISHOT", "true").lower() == "true",
+    "openai_min_shots": int(os.getenv("OBJECT_OPENAI_MIN_SHOTS", "1")),
 }
 
 # Speaker / Voice Recognition Settings

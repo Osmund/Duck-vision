@@ -34,7 +34,7 @@ class OpenAIVision:
             raise ValueError("OPENAI_API_KEY ikke funnet i environment")
         
         self.api_url = "https://api.openai.com/v1/chat/completions"
-        self.model = "gpt-4o-mini"  # 2x raskere og 10x billigere enn gpt-4o!
+        self.model = "gpt-4o"  # Bedre på gjenkjenning av objekter og detaljer
         
         logger.info(f"OpenAI Vision initialisert (model: {self.model})")
     
@@ -64,7 +64,7 @@ class OpenAIVision:
             Base64-encodet bilde
         """
         # Resize hvis for stort (OpenAI Vision trenger ikke full oppløsning)
-        max_size = 512  # Minimal størrelse for rask upload
+        max_size = 1024  # Større for bedre detaljer
         if max(pil_image.size) > max_size:
             ratio = max_size / max(pil_image.size)
             new_size = tuple(int(dim * ratio) for dim in pil_image.size)
@@ -80,7 +80,8 @@ class OpenAIVision:
                      image_path: Optional[Path] = None,
                      pil_image: Optional[Image.Image] = None,
                      question: Optional[str] = None,
-                     max_tokens: int = 300) -> dict:
+                     max_tokens: int = 800,
+                     detail: str = "auto") -> dict:
         """
         Analyser bilde med OpenAI Vision API.
         
@@ -97,7 +98,9 @@ class OpenAIVision:
             # Encoder bilde
             if pil_image:
                 # Lagre bildet som sendes for debugging
-                debug_path = "/tmp/openai_vision_debug.jpg"
+                default_debug_path = Path(__file__).resolve().parents[1] / "data" / "logs" / "openai_vision_debug.jpg"
+                debug_path = Path(os.getenv("OPENAI_VISION_DEBUG_PATH", str(default_debug_path)))
+                debug_path.parent.mkdir(parents=True, exist_ok=True)
                 pil_image.save(debug_path, "JPEG", quality=85)
                 logger.info(f"💾 Lagret debug-bilde: {debug_path} (størrelse: {pil_image.size})")
                 
@@ -115,10 +118,10 @@ class OpenAIVision:
                 prompt = (
                     "Beskriv dette bildet på norsk. "
                     "Fokuser på hva du ser av personer, objekter, aktiviteter og rommet generelt. "
-                    "Vær konkret og detaljert, men kortfattet."
+                    "Vær grundig og detaljert. Beskriv farger, materialer, plassering, belysning og stemning."
                 )
             else:
-                prompt = f"{question}\n\nSvar på norsk."
+                prompt = f"Se på bildet og svar: {question}\n\nSvar på norsk."
             
             # API request
             headers = {
@@ -140,7 +143,7 @@ class OpenAIVision:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/jpeg;base64,{base64_image}",
-                                    "detail": "low"  # "low" er mye raskere og billigere
+                                    "detail": detail  # auto | low | high
                                 }
                             }
                         ]
@@ -198,7 +201,7 @@ class OpenAIVision:
         Returns:
             Svar som string, eller None hvis feil
         """
-        result = self.analyze_image(pil_image=pil_image, question=question, max_tokens=150)
+        result = self.analyze_image(pil_image=pil_image, question=question, max_tokens=400)
         if result["success"]:
             return result["description"]
         else:
