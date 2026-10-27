@@ -1,0 +1,28 @@
+[Unit]
+Description=Duck-Vision Web Dashboard
+After=network-online.target duck-vision.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admog
+Group=admog
+WorkingDirectory=/home/admog/Code/Duck-vision
+Environment="PATH=/home/admog/Code/Duck-vision/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="VISION_WEB_PORT=8090"
+
+ExecStart=/home/admog/Code/Duck-vision/.venv/bin/python3 /home/admog/Code/Duck-vision/src/vision_web.py
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=duck-vision-web
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
